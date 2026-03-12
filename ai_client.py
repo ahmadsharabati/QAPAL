@@ -101,7 +101,7 @@ class AIClient:
                 )
             return _AnthropicClient(
                 api_key = api_key,
-                model   = model or "claude-sonnet-4-5",
+                model   = model or "claude-sonnet-4-6",
             )
 
         if provider in ("openai", "grok", "xai"):
