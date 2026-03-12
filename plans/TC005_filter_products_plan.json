@@ -1,0 +1,48 @@
+{
+  "test_id": "TC005_filter_products",
+  "name": "User can filter products successfully",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://practicesoftwaretesting.com/category/hand-tools"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "role",
+        "value": {
+          "role": "combobox",
+          "name": "Sort"
+        }
+      }
+    },
+    {
+      "action": "type",
+      "selector": {
+        "strategy": "role",
+        "value": {
+          "role": "combobox",
+          "name": "Sort"
+        }
+      },
+      "value": "Price: Low to High"
+    }
+  ],
+  "assertions": [
+    {
+      "type": "element_exists",
+      "selector": {
+        "strategy": "role",
+        "value": {
+          "role": "listitem"
+        }
+      }
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-10T23:36:14.455776+00:00",
+    "locators": 344,
+    "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
+  }
+}

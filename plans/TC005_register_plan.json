@@ -1,0 +1,63 @@
+{
+  "test_id": "TC005_register",
+  "name": "User can register",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://practicesoftwaretesting.com/auth/register"
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "first-name"
+      },
+      "value": "Test"
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "last-name"
+      },
+      "value": "User"
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "email"
+      },
+      "value": "testuser@practicesoftwaretesting.com"
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "password"
+      },
+      "value": "pass123"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "register-submit"
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "type": "url_contains",
+      "value": "/auth/register",
+      "_auto_fixed": true,
+      "_original_value": "/auth/login"
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-11T19:01:06.411283+00:00",
+    "locators": 348,
+    "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
+  }
+}

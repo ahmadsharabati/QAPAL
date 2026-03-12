@@ -1,0 +1,38 @@
+{
+  "test_id": "TC004_filters",
+  "name": "User can apply filters",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://practicesoftwaretesting.com/category/hand-tools"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "filters"
+      },
+      "element_id": "427a855c956f4738"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "category-01KKCZNFE6N4ZQQQS26QHMQ8VP"
+      },
+      "element_id": "23e4ee008bc7dcf3"
+    }
+  ],
+  "assertions": [
+    {
+      "type": "url_contains",
+      "value": "/category/hand-tools"
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-10T23:54:36.869235+00:00",
+    "locators": 344,
+    "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "test_id": "TC004_add_to_cart",
+  "name": "User can add a product to the cart",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://practicessoftwaretesting.com/auth/login"
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "email"
+      },
+      "element_id": "elem10",
+      "value": "customer3@practicessoftwaretesting.com",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "password"
+      },
+      "element_id": "elem11",
+      "value": "pass123",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "login-submit"
+      },
+      "element_id": "elem12",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid_prefix",
+        "value": "product-",
+        "index": 0
+      },
+      "element_id": "elem13",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "add-to-cart"
+      },
+      "element_id": "elem14",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    }
+  ],
+  "assertions": [
+    {
+      "type": "element_exists",
+      "selector": {
+        "strategy": "testid",
+        "value": "nav-cart"
+      }
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-11T19:30:57.115564+00:00",
+    "locators": 372,
+    "ai_model": "openai/gpt-oss-120b"
+  }
+}

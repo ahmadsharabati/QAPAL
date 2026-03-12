@@ -1,0 +1,32 @@
+{
+  "test_id": "TC005_product_details",
+  "name": "User can view product details",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://practicesoftwaretesting.com/product/01KKCNBX0EAJTMACG21BP6M9E7"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "role",
+        "value": {
+          "role": "link",
+          "name": "Claw Hammer with Shock Reduction Grip ABCDE$13.41"
+        }
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "type": "url_equals",
+      "value": "https://practicesoftwaretesting.com/product/01KKCNBX0EAJTMACG21BP6M9E7"
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-10T23:28:49.539232+00:00",
+    "locators": 350,
+    "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
+  }
+}

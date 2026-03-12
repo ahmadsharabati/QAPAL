@@ -1,0 +1,36 @@
+{
+  "test_id": "TC005_add_to_cart",
+  "name": "User can add product to cart successfully",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://practicesoftwaretesting.com/category/hand-tools"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "product-01KKEXF1FCV1ZRA2ATD047D6TT"
+      }
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "add-to-cart"
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "type": "url_contains",
+      "value": "/product/01KKEXF1FCV1ZRA2ATD047D6TT"
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-11T17:49:17.060706+00:00",
+    "locators": 353,
+    "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
+  }
+}

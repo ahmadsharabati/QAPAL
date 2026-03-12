@@ -1,0 +1,122 @@
+{
+  "test_id": "TC004_checkout_flow",
+  "name": "User can complete checkout with a product",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://practicesoftwaretesting.com/auth/login"
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "email"
+      },
+      "value": "customer2@practicesoftwaretesting.com"
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "password"
+      },
+      "value": "welcome01"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "login-submit"
+      }
+    },
+    {
+      "action": "navigate",
+      "url": "https://practicesoftwaretesting.com/product/01KKCNBX0EAJTMACG21BP6M9E7"
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "product-quantity"
+      },
+      "value": "1"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "proceed-3"
+      }
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "street"
+      },
+      "value": "123 Main St"
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "city"
+      },
+      "value": "Anytown"
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "state"
+      },
+      "value": "CA"
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "country"
+      },
+      "value": "United States"
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "postal_code"
+      },
+      "value": "12345"
+    },
+    {
+      "action": "select",
+      "selector": {
+        "strategy": "testid",
+        "value": "payment-method"
+      },
+      "value": "Credit Card"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "finish"
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "type": "element_exists",
+      "value": {
+        "strategy": "testid",
+        "value": "nav-profile"
+      }
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-11T19:55:13.246410+00:00",
+    "locators": 356,
+    "ai_model": "openai/gpt-oss-120b"
+  }
+}

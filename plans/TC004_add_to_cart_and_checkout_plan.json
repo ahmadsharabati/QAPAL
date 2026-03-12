@@ -1,0 +1,162 @@
+{
+  "test_id": "TC004_add_to_cart_and_checkout",
+  "name": "User can add a product to cart and complete checkout",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://practicesoftwaretesting.com"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "nav-hand-tools"
+      },
+      "element_id": "nav-hand-tools",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid_prefix",
+        "value": "product-",
+        "index": 0
+      },
+      "element_id": "product-0",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "product-quantity"
+      },
+      "element_id": "product-quantity",
+      "value": "2",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "nav-cart"
+      },
+      "element_id": "nav-cart",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "proceed-3"
+      },
+      "element_id": "proceed-3",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "street"
+      },
+      "element_id": "street",
+      "value": "456 Oak Ave",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "city"
+      },
+      "element_id": "city",
+      "value": "Metropolis",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "state"
+      },
+      "element_id": "state",
+      "value": "NY",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "country"
+      },
+      "element_id": "country",
+      "value": "United States",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "postal_code"
+      },
+      "element_id": "postal_code",
+      "value": "10001",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "select",
+      "selector": {
+        "strategy": "testid",
+        "value": "payment-method"
+      },
+      "element_id": "payment-method",
+      "value": "Credit Card",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "finish"
+      },
+      "element_id": "finish",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    }
+  ],
+  "assertions": [
+    {
+      "type": "url_contains",
+      "value": "/product/",
+      "_auto_fixed": true,
+      "_original_value": "/checkout"
+    },
+    {
+      "type": "element_visible",
+      "selector": {
+        "strategy": "testid",
+        "value": "nav-profile"
+      },
+      "element_id": "nav-profile",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-11T19:49:40.531503+00:00",
+    "locators": 356,
+    "ai_model": "openai/gpt-oss-120b"
+  }
+}

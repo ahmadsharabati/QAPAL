@@ -1,0 +1,39 @@
+{
+  "test_id": "TC004_product_details",
+  "name": "User can view product details",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://practicesoftwaretesting.com"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid_prefix",
+        "value": "product-",
+        "index": 0
+      },
+      "element_id": "product-01KKCNBX0EAJTMACG21BP6M9E7",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    }
+  ],
+  "assertions": [
+    {
+      "type": "element_exists",
+      "selector": {
+        "strategy": "role",
+        "value": {
+          "role": "link",
+          "name": "More information"
+        }
+      }
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-11T19:18:45.864481+00:00",
+    "locators": 348,
+    "ai_model": "meta/llama-3.3-70b-instruct"
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "test_id": "TC003_product_filter",
+  "name": "User can filter hand tools by category",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://practicesoftwaretesting.com"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "nav-hand-tools"
+      }
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "filters"
+      }
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid_prefix",
+        "value": "category-",
+        "index": 0
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "type": "element_visible",
+      "selector": {
+        "strategy": "testid_prefix",
+        "value": "product-",
+        "index": 0
+      }
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-11T19:41:33.344160+00:00",
+    "locators": 356,
+    "ai_model": "openai/gpt-oss-120b"
+  }
+}

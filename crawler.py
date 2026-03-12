@@ -1,0 +1,829 @@
+"""
+crawler.py — QAPal Page Crawler
+=================================
+Triggered by the executor on every navigation, or run standalone to seed the DB.
+
+Collection strategy:
+  Primary:   a11y tree  (shadow DOM transparent)
+  Secondary: DOM scan   (non-semantic elements with onclick/testid/tabindex)
+  Tertiary:  iframes    (a11y inside accessible frames, skips cross-origin)
+
+No MCP. Direct Playwright. No config files — all config from environment.
+
+Install:
+  pip install playwright tinydb python-dotenv
+  playwright install chromium
+"""
+
+import asyncio
+import os
+import re
+from datetime import datetime, timezone
+from typing import Optional
+from urllib.parse import urlparse
+
+from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+
+from locator_db import LocatorDB, _make_id, _normalize_url
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+
+# ── Config ────────────────────────────────────────────────────────────
+
+STALE_MINUTES = int(os.getenv("CRAWLER_STALE_MINUTES", "60"))
+
+
+# ── Helpers ───────────────────────────────────────────────────────────
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# ── A11y collection JS ───────────────────────────────────────────────
+
+A11Y_JS = r"""
+() => {
+  var INTERACTIVE_ROLES = [
+    'button','link','textbox','searchbox','combobox','listbox',
+    'checkbox','radio','switch','slider','spinbutton','menuitem',
+    'menuitemcheckbox','menuitemradio','option','tab','treeitem',
+    'gridcell','columnheader','rowheader'
+  ];
+
+  function getRole(el) {
+    var explicit = el.getAttribute('role');
+    if (explicit) return explicit.toLowerCase();
+    var tag  = el.tagName.toLowerCase();
+    var type = (el.getAttribute('type') || '').toLowerCase();
+    if (tag === 'button') return 'button';
+    if (tag === 'a' && el.href) return 'link';
+    if (tag === 'input') {
+      return ({
+        text:'textbox',email:'textbox',password:'textbox',
+        search:'searchbox',tel:'textbox',url:'textbox',
+        number:'spinbutton',range:'slider',
+        checkbox:'checkbox',radio:'radio',
+        submit:'button',reset:'button',button:'button',
+      })[type] || 'textbox';
+    }
+    if (tag === 'select')   return 'combobox';
+    if (tag === 'textarea') return 'textbox';
+    return null;
+  }
+
+  function getName(el) {
+    var tag = el.tagName.toLowerCase();
+    var v;
+    v = el.getAttribute('aria-label'); if (v) return v.trim();
+    var lb = el.getAttribute('aria-labelledby');
+    if (lb) {
+      return lb.split(/\s+/)
+        .map(function(id){ return (document.getElementById(id)||{}).textContent||''; })
+        .join(' ').trim();
+    }
+    if (el.labels && el.labels.length) return el.labels[0].textContent.trim().slice(0,80);
+    v = el.getAttribute('placeholder'); if (v) return v.trim();
+    v = el.getAttribute('title');       if (v) return v.trim();
+    if (tag === 'button' || tag === 'a') {
+      v = el.textContent.trim(); if (v && v.length < 80) return v;
+    }
+    return '';
+  }
+
+  function getTestId(el) {
+    return el.getAttribute('data-testid')
+        || el.getAttribute('data-cy')
+        || el.getAttribute('data-qa')
+        || el.getAttribute('data-test')
+        || null;
+  }
+
+  function getContainer(el) {
+    var LANDMARKS = ['dialog','main','nav','aside','section','form','header','footer','article'];
+    var node = el.parentElement;
+    for (var depth = 0; depth < 8 && node && node !== document.body; depth++) {
+      var tag  = node.tagName.toLowerCase();
+      var role = (node.getAttribute('role') || '').toLowerCase();
+      var aria = node.getAttribute('aria-label') ||
+                 (node.getAttribute('aria-labelledby') &&
+                  (document.getElementById(node.getAttribute('aria-labelledby'))||{}).textContent) || '';
+      if (LANDMARKS.indexOf(tag) !== -1 || LANDMARKS.indexOf(role) !== -1) {
+        var selector = tag;
+        if (aria) selector += '[aria-label="' + aria.trim() + '"]';
+        else if (node.id && !/^(:r|react-|ng-|v-|\d)/.test(node.id))
+          selector += '#' + node.id;
+        var siblings = node.parentElement
+          ? Array.from(node.parentElement.children).filter(function(c){ return c.tagName===node.tagName; })
+          : [];
+        if (siblings.length > 1) {
+          var idx = siblings.indexOf(node) + 1;
+          selector += ':nth-of-type(' + idx + ')';
+        }
+        return selector;
+      }
+      node = node.parentElement;
+    }
+    return '';
+  }
+
+  function getDomPath(el) {
+    var parts = [], node = el, depth = 0;
+    while (node && node !== document.body && depth < 4) {
+      var tag = node.tagName.toLowerCase();
+      var parent = node.parentElement;
+      if (!parent) break;
+      var siblings = Array.from(parent.children).filter(function(c){ return c.tagName===node.tagName; });
+      var idx = siblings.indexOf(node) + 1;
+      parts.unshift(siblings.length > 1 ? tag+':nth('+idx+')' : tag);
+      node = parent; depth++;
+    }
+    return parts.join('>');
+  }
+
+  function looksLikeCode(str) {
+    return str.indexOf('{') !== -1 || str.indexOf('function') !== -1
+      || str.indexOf('<') !== -1 || str.length > 200;
+  }
+
+  var SKIP_TAGS = ['script','style','template','noscript','meta','link','head'];
+  var results   = [];
+
+  var nodes = document.querySelectorAll(
+    'button,input,select,textarea,a[href],' +
+    '[role],[aria-label],[tabindex],[data-testid],[data-cy],[data-qa]'
+  );
+
+  for (var i = 0; i < nodes.length; i++) {
+    var el   = nodes[i];
+    var role = getRole(el);
+    if (!role) continue;
+    if (INTERACTIVE_ROLES.indexOf(role) === -1) continue;
+    if (SKIP_TAGS.indexOf(el.tagName.toLowerCase()) !== -1) continue;
+
+    // We no longer skip hidden elements.
+    // Capturing hidden menus, tabs, and modals ensures the AI knows they exist 
+    // and can formulate a plan to trigger their visibility.
+    var style = window.getComputedStyle(el);
+    var isHidden = (style.display === 'none' || style.visibility === 'hidden'
+        || style.opacity === '0' || el.hidden);
+    
+    var rect = el.getBoundingClientRect();
+    var isZeroSize = (rect.width === 0 && rect.height === 0);
+
+    var name = getName(el);
+    if (looksLikeCode(name)) continue;
+
+    var testid    = getTestId(el);
+    var container = getContainer(el);
+    var domPath   = getDomPath(el);
+    var tag       = el.tagName.toLowerCase();
+    var loc;
+
+    if (testid) {
+      loc = { strategy: 'testid', value: testid };
+    } else if (role && name) {
+      loc = { strategy: 'role', value: { role: role, name: name } };
+    } else {
+      loc = { strategy: 'none', value: '', actionable: false };
+    }
+
+    results.push({
+      role:       role,
+      name:       name,
+      tag:        tag,
+      testid:     testid,
+      container:  container,
+      domPath:    domPath,
+      ariaLabel:  el.getAttribute('aria-label') || '',
+      loc:        loc,
+      actionable: !!(testid || (role && name)) && el.offsetWidth > 0 && el.offsetHeight > 0,
+    });
+  }
+  return results;
+}
+"""
+
+DOM_FALLBACK_JS = r"""
+() => {
+  function getDomPath(el) {
+    var parts = [], node = el, depth = 0;
+    while (node && node !== document.body && depth < 4) {
+      var tag = node.tagName.toLowerCase();
+      var parent = node.parentElement;
+      if (!parent) break;
+      var siblings = Array.from(parent.children).filter(function(c){ return c.tagName===node.tagName; });
+      var idx = siblings.indexOf(node) + 1;
+      parts.unshift(siblings.length > 1 ? tag+':nth('+idx+')' : tag);
+      node = parent; depth++;
+    }
+    return parts.join('>');
+  }
+
+  function getContainer(el) {
+    var LANDMARKS = ['dialog','main','nav','aside','section','form','header','footer','article'];
+    var node = el.parentElement;
+    for (var depth = 0; depth < 8 && node && node !== document.body; depth++) {
+      var tag  = node.tagName.toLowerCase();
+      var role = (node.getAttribute('role') || '').toLowerCase();
+      if (LANDMARKS.indexOf(tag) !== -1 || LANDMARKS.indexOf(role) !== -1) {
+        var selector = tag;
+        if (node.id && !/^(:r|react-|ng-|v-|\d)/.test(node.id))
+          selector += '#' + node.id;
+        var siblings = node.parentElement
+          ? Array.from(node.parentElement.children).filter(function(c){ return c.tagName===node.tagName; })
+          : [];
+        if (siblings.length > 1) {
+          var idx = siblings.indexOf(node) + 1;
+          selector += ':nth-of-type(' + idx + ')';
+        }
+        return selector;
+      }
+      node = node.parentElement;
+    }
+    return '';
+  }
+
+  var nodes = document.querySelectorAll(
+    "[onclick]," +
+    "[tabindex='0']:not(input):not(button):not(a):not(select):not(textarea):not([role])," +
+    "[data-testid]:not(input):not(button):not(a):not(select):not(textarea):not([role])," +
+    "[data-cy]:not(input):not(button):not(a):not(select):not(textarea):not([role])," +
+    "[data-qa]:not(input):not(button):not(a):not(select):not(textarea):not([role])"
+  );
+
+  var results = [];
+  for (var i = 0; i < nodes.length; i++) {
+    var el  = nodes[i];
+    var tag = el.tagName.toLowerCase();
+    if (el.getAttribute('role')) continue;
+    if (['button','input','select','textarea','a'].indexOf(tag) !== -1) continue;
+
+    var testid = el.getAttribute('data-testid')
+      || el.getAttribute('data-cy')
+      || el.getAttribute('data-qa')
+      || null;
+
+    var name = el.getAttribute('aria-label')
+      || testid
+      || el.textContent.trim().slice(0, 80)
+      || '';
+
+    var selector = testid
+      ? '[data-testid="' + testid + '"]'
+      : tag + (el.id && !/^(:r|react-|ng-|v-|\d)/.test(el.id) ? '#'+el.id : '');
+
+    results.push({
+      role:         'none',
+      name:         name,
+      tag:          tag,
+      testid:       testid,
+      container:    getContainer(el),
+      domPath:      getDomPath(el),
+      ariaLabel:    el.getAttribute('aria-label') || '',
+      loc:          { strategy: testid ? 'testid' : 'css', value: selector },
+      dom_fallback: true,
+      actionable:   !!testid,
+    });
+  }
+  return results;
+}
+"""
+
+
+# ── Stale detection ───────────────────────────────────────────────────
+
+def _is_stale(db: LocatorDB, url: str) -> bool:
+    page = db.get_page(url)
+    if not page:
+        return True
+    last = page.get("last_crawled")
+    if not last:
+        return True
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() / 60
+        return age > STALE_MINUTES
+    except Exception:
+        return True
+
+
+# ── Stable render wait ────────────────────────────────────────────────
+
+async def wait_for_stable(page: Page, timeout: int = 10_000):
+    """
+    Wait for the page to finish rendering.
+    1. networkidle — fast path for traditional pages
+    2. MutationObserver settle — handles SPAs with persistent connections
+    3. 200ms final flush
+    """
+    try:
+        await page.wait_for_load_state("networkidle", timeout=min(timeout, 4000))
+    except Exception:
+        pass
+
+    remaining = max(1000, timeout - 4000)
+    try:
+        await page.evaluate(
+            """(timeout) => new Promise(resolve => {
+                var settled = false, tid = null;
+                var obs = new MutationObserver(function() {
+                    clearTimeout(tid);
+                    tid = setTimeout(function() {
+                        if (!settled) { settled=true; obs.disconnect(); resolve(); }
+                    }, 500);
+                });
+                obs.observe(document.body, {childList:true,subtree:true,attributes:true});
+                setTimeout(function() {
+                    if (!settled) { settled=true; obs.disconnect(); resolve(); }
+                }, timeout);
+            })""",
+            remaining,
+        )
+    except Exception:
+        pass
+
+    await page.wait_for_timeout(200)
+
+
+# ── Auth ──────────────────────────────────────────────────────────────
+
+async def _build_context(
+    browser:     Browser,
+    db:          LocatorDB,
+    url:         str,
+    credentials: Optional[dict] = None,
+) -> BrowserContext:
+    domain  = urlparse(url).netloc
+    session = db.get_session(domain)
+
+    if session and session.get("storage_state"):
+        try:
+            return await browser.new_context(storage_state=session["storage_state"])
+        except Exception:
+            pass
+
+    if credentials:
+        ctx  = await browser.new_context()
+        page = await ctx.new_page()
+        try:
+            await _run_login(page, credentials)
+            state = await ctx.storage_state()
+            db.save_session(
+                domain        = domain,
+                storage_state = state,
+                auth_type     = "credentials",
+                cookies       = state.get("cookies", []),
+            )
+            await page.close()
+            return ctx
+        except Exception as e:
+            await page.close()
+            await ctx.close()
+            raise RuntimeError(f"Login failed: {e}") from e
+
+    return await browser.new_context()
+
+
+_USERNAME_SELECTORS = [
+    "input[type=email]",
+    "input[type=text][name*=user]",
+    "input[type=text][name*=email]",
+    "input[type=text][name*=login]",
+    "input[type=text][id*=user]",
+    "input[type=text][id*=email]",
+    "input[type=text][id*=login]",
+    "input[type=text]",
+]
+
+_PASSWORD_SELECTORS = [
+    "input[type=password]",
+]
+
+_SUBMIT_SELECTORS = [
+    "button[type=submit]",
+    "input[type=submit]",
+    "button:text-matches('sign in', 'i')",
+    "button:text-matches('log in', 'i')",
+    "button:text-matches('login', 'i')",
+    "button:text-matches('submit', 'i')",
+    "button",
+]
+
+
+async def _find_selector(page: Page, candidates: list[str]) -> str:
+    """Return the first selector from candidates that matches a visible element."""
+    for sel in candidates:
+        try:
+            if await page.locator(sel).first.is_visible(timeout=3000):
+                return sel
+        except Exception:
+            continue
+    raise RuntimeError(f"Could not find a matching element. Tried: {candidates}")
+
+
+async def _run_login(page: Page, credentials: dict):
+    await page.goto(credentials["url"], wait_until="networkidle")
+
+    user_sel   = credentials.get("username_selector") or await _find_selector(page, _USERNAME_SELECTORS)
+    pass_sel   = credentials.get("password_selector") or await _find_selector(page, _PASSWORD_SELECTORS)
+
+    await page.fill(user_sel, credentials["username"])
+    await page.fill(pass_sel, credentials["password"])
+
+    submit_sel = credentials.get("submit_selector") or await _find_selector(page, _SUBMIT_SELECTORS)
+    await page.click(submit_sel)
+
+    wait_for = credentials.get("wait_for")
+    if wait_for:
+        await page.wait_for_selector(wait_for, timeout=10_000)
+    else:
+        await wait_for_stable(page, timeout=10_000)
+
+
+# ── Core crawl ────────────────────────────────────────────────────────
+
+async def crawl_page(
+    page:  Page,
+    url:   str,
+    db:    LocatorDB,
+    force: bool = False,
+) -> dict:
+    """
+    Crawl a single page and update the locator DB.
+    Returns a summary dict.
+    """
+    url = _normalize_url(url)
+
+    if not force and not _is_stale(db, url):
+        return {
+            "url":      url,
+            "crawled":  False,
+            "elements": len(db.get_all(url)),
+            "new":      0,
+            "updated":  0,
+            "invalid":  0,
+            "warnings": [],
+        }
+
+    seen_ids     = set()
+    all_elements = []
+    all_warnings = []
+
+    # Optional: simulate hovers on potential menus to trigger lazy rendering
+    try:
+        await page.evaluate('''() => {
+            document.querySelectorAll('[aria-haspopup], [aria-expanded="false"], .menu, .dropdown').forEach(el => {
+                try { el.dispatchEvent(new MouseEvent('mouseover', {bubbles: true})); } catch(e) {}
+            });
+        }''')
+        await page.wait_for_timeout(200) # give JS time to render the dropdowns
+    except Exception as e:
+        all_warnings.append(f"Hover expansion failed: {e}")
+
+    # Main frame — a11y
+    try:
+        a11y = await page.evaluate(A11Y_JS)
+        for el in a11y:
+            el["frameId"] = "main"
+        all_elements.extend(a11y)
+    except Exception as e:
+        all_warnings.append(f"a11y collection failed: {e}")
+
+    # Main frame — DOM fallback
+    try:
+        dom_els = await page.evaluate(DOM_FALLBACK_JS)
+        for el in dom_els:
+            el["frameId"] = "main"
+        all_elements.extend(dom_els)
+    except Exception as e:
+        all_warnings.append(f"DOM fallback failed: {e}")
+
+    # iframes
+    for frame_idx, frame in enumerate(page.frames):
+        if frame == page.main_frame:
+            continue
+        raw_url = frame.url or ""
+        if raw_url and not raw_url.startswith(("about:", "blob:", "javascript:", "data:")):
+            frame_url = _normalize_url(raw_url)
+        else:
+            frame_url = frame.name or f"frame-{frame_idx}"
+
+        try:
+            frame_a11y = await frame.evaluate(A11Y_JS)
+            for el in frame_a11y:
+                el["frameId"]     = frame_url
+                el["frameName"]   = frame.name or ""
+                el["crossOrigin"] = False
+            all_elements.extend(frame_a11y)
+
+            frame_dom = await frame.evaluate(DOM_FALLBACK_JS)
+            for el in frame_dom:
+                el["frameId"]     = frame_url
+                el["frameName"]   = frame.name or ""
+                el["crossOrigin"] = False
+            all_elements.extend(frame_dom)
+        except Exception:
+            all_warnings.append(f"Cross-origin iframe blocked: {frame_url}")
+            all_elements.append({
+                "role": "iframe", "name": frame.name or frame_url,
+                "tag": "iframe", "frameId": frame_url,
+                "frameName": frame.name or "", "crossOrigin": True,
+                "container": "", "domPath": "",
+                "loc": {"strategy": "css",
+                        "value": f"iframe[name='{frame.name}']" if frame.name
+                                 else f"iframe:nth-of-type({frame_idx+1})"},
+                "actionable": False,
+            })
+
+    # Upsert into DB
+    new_count = updated_count = 0
+    for el in all_elements:
+        role      = el.get("role", "")
+        name      = el.get("name", "")
+        container = el.get("container", "")
+        furl      = el.get("frameId", "main")
+        dom_path  = el.get("domPath", "")
+        doc_id    = _make_id(url, role, name, container, furl, dom_path)
+
+        existing = db._locs.get(db._Q.id == doc_id)
+        doc      = db.upsert(url, el)
+
+        if doc:
+            seen_ids.add(doc_id)
+            if existing:
+                updated_count += 1
+            else:
+                new_count += 1
+            if doc.get("warnings"):
+                all_warnings.extend(doc["warnings"])
+
+    db.soft_decay(url, seen_ids)
+    invalidated = len([
+        d for d in db.get_all(url, valid_only=False)
+        if not d.get("history", {}).get("valid", True)
+    ])
+    db.upsert_page(url, len(all_elements))
+
+    return {
+        "url":      url,
+        "crawled":  True,
+        "elements": len(all_elements),
+        "new":      new_count,
+        "updated":  updated_count,
+        "invalid":  invalidated,
+        "warnings": list(dict.fromkeys(all_warnings)),
+    }
+
+
+# ── Crawler class ─────────────────────────────────────────────────────
+
+class Crawler:
+    """
+    Stateful crawler. Holds one browser open.
+
+    Usage:
+        async with Crawler(db) as crawler:
+            result = await crawler.on_page_load(page, url)
+
+        async with Crawler(db) as crawler:
+            results = await crawler.bulk_crawl(["https://app.com/", "/login"])
+    """
+
+    def __init__(
+        self,
+        db:          LocatorDB,
+        headless:    Optional[bool] = None,
+        credentials: Optional[dict] = None,
+    ):
+        self._db          = db
+        self._headless    = headless if headless is not None else (
+            os.getenv("QAPAL_HEADLESS", "true").lower() == "true"
+        )
+        self._credentials = credentials
+        self._pw          = None
+        self._browser     = None
+        self._started     = False
+
+    async def start(self):
+        if self._started:
+            return
+        self._pw      = await async_playwright().start()
+        self._pw.selectors.set_test_id_attribute("data-test")
+        self._browser = await self._pw.chromium.launch(headless=self._headless)
+        self._started = True
+
+    async def stop(self):
+        if not self._started:
+            return
+        if self._browser:
+            try: await self._browser.close()
+            except Exception: pass
+        if self._pw:
+            try: await self._pw.stop()
+            except Exception: pass
+        self._started = False
+        self._browser = None
+        self._pw      = None
+
+    async def __aenter__(self):
+        await self.start()
+        return self
+
+    async def __aexit__(self, *_):
+        await self.stop()
+
+    async def on_page_load(self, page: Page, url: str, force: bool = False) -> dict:
+        """
+        Called by executor on every navigation.
+        Does NOT wait for stable — executor already did that.
+        """
+        return await crawl_page(page=page, url=_normalize_url(url), db=self._db, force=force)
+
+    async def crawl_url(self, url: str, force: bool = False) -> dict:
+        """Crawl a single URL in an isolated context."""
+        if not self._started:
+            await self.start()
+        ctx  = await _build_context(self._browser, self._db, url, self._credentials)
+        page = await ctx.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded")
+            await wait_for_stable(page)
+            return await crawl_page(page, _normalize_url(url), self._db, force=force)
+        finally:
+            await ctx.close()
+
+    async def bulk_crawl(
+        self,
+        urls:        list,
+        concurrency: int  = None,
+        force:       bool = False,
+    ) -> list:
+        """
+        Crawl multiple URLs concurrently.
+        Page fetches run in parallel; DB writes are serialised.
+        """
+        if not self._started:
+            await self.start()
+
+        concurrency = concurrency or int(os.getenv("QAPAL_CRAWL_CONCURRENCY", "3"))
+        semaphore   = asyncio.Semaphore(concurrency)
+        db_lock     = asyncio.Lock()
+        results     = []
+
+        async def _one(url: str):
+            async with semaphore:
+                ctx  = await _build_context(self._browser, self._db, url, self._credentials)
+                page = await ctx.new_page()
+                try:
+                    await page.goto(url, wait_until="domcontentloaded")
+                    await wait_for_stable(page)
+                    async with db_lock:
+                        result = await crawl_page(page, _normalize_url(url), self._db, force=force)
+                except Exception as e:
+                    result = {
+                        "url": _normalize_url(url), "crawled": False,
+                        "elements": 0, "new": 0, "updated": 0, "invalid": 0,
+                        "warnings": [f"Crawl failed: {e}"],
+                    }
+                finally:
+                    await ctx.close()
+
+                results.append(result)
+                if result["crawled"]:
+                    print(
+                        f"  [crawled] {url} — {result['elements']} elements "
+                        f"| {result['new']} new | {result['updated']} updated"
+                    )
+                else:
+                    print(f"  [skipped] {url} (fresh)")
+                for w in result.get("warnings", []):
+                    print(f"    ⚠  {w}")
+
+        await asyncio.gather(*[_one(u) for u in urls])
+        return results
+
+    async def spider_crawl(
+        self,
+        start_urls:  list,
+        max_depth:   int  = 2,
+        max_pages:   int  = 30,
+        concurrency: int  = None,
+        force:       bool = False,
+    ) -> list:
+        """
+        Spider the site starting from start_urls, following same-domain links
+        up to max_depth hops deep, crawling at most max_pages pages.
+        Deduplicates by URL pattern so e.g. /product/ID-1 and /product/ID-2
+        are treated as the same page type — only one is crawled.
+        Discovery runs level-by-level concurrently (not sequentially).
+        """
+        if not self._started:
+            await self.start()
+
+        disc_concurrency = int(os.getenv("QAPAL_CRAWL_CONCURRENCY", "3"))
+        disc_semaphore   = asyncio.Semaphore(disc_concurrency)
+
+        # Replace ID-like path segments with {id} for pattern deduplication.
+        # Matches ULIDs (26 base32 chars), UUIDs, hex strings, and pure numbers.
+        _ID_RE = re.compile(
+            r"(?<=/)"
+            r"([A-Za-z0-9]{20,}|[0-9a-f]{8}-[0-9a-f-]{27}|[0-9]+)"
+            r"(?=/|$)",
+        )
+
+        def _url_pattern(url: str) -> str:
+            p = urlparse(url)
+            return p.netloc + _ID_RE.sub("{id}", p.path)
+
+        allowed_domains  = {urlparse(u).netloc for u in start_urls}
+        visited_urls     = set()
+        visited_patterns = set()
+        all_urls         = []
+
+        def _accept(norm: str) -> bool:
+            """Return True and register URL if it's a new pattern we should visit."""
+            if norm in visited_urls or len(all_urls) >= max_pages:
+                return False
+            pat = _url_pattern(norm)
+            if pat in visited_patterns:
+                return False
+            visited_urls.add(norm)
+            visited_patterns.add(pat)
+            all_urls.append(norm)
+            return True
+
+        async def _extract_links(url: str) -> list[str]:
+            """Navigate to url, return same-domain hrefs. Fast — no DB write."""
+            async with disc_semaphore:
+                ctx  = await _build_context(self._browser, self._db, url, self._credentials)
+                page = await ctx.new_page()
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=15_000)
+                    await page.wait_for_timeout(800)   # brief settle for SPAs
+                    hrefs = await page.eval_on_selector_all(
+                        "a[href]",
+                        "els => els.map(e => e.href).filter(h => h "
+                        "&& !h.startsWith('javascript') "
+                        "&& !h.startsWith('mailto') "
+                        "&& !h.startsWith('tel'))"
+                    )
+                    return hrefs
+                except Exception:
+                    return []
+                finally:
+                    await ctx.close()
+
+        # Seed with start_urls (depth 0)
+        current_level = []
+        for u in start_urls:
+            norm = _normalize_url(u)
+            if _accept(norm):
+                current_level.append(norm)
+
+        # BFS level-by-level, each level fetched concurrently
+        for depth in range(max_depth):
+            if not current_level or len(all_urls) >= max_pages:
+                break
+            print(f"  [spider] depth {depth}: discovering links from {len(current_level)} page(s)...")
+            link_lists = await asyncio.gather(*[_extract_links(u) for u in current_level])
+
+            next_level = []
+            for hrefs in link_lists:
+                for href in hrefs:
+                    if urlparse(href).netloc not in allowed_domains:
+                        continue
+                    norm = _normalize_url(href)
+                    if _accept(norm):
+                        next_level.append(norm)
+                    if len(all_urls) >= max_pages:
+                        break
+
+            current_level = next_level
+
+        print(f"  [spider] discovered {len(all_urls)} unique page type(s)")
+        return await self.bulk_crawl(all_urls, concurrency=concurrency, force=force)
+
+
+# ── Standalone Testing ────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    # Standalone smoke test
+    import asyncio
+    async def test():
+        from locator_db import LocatorDB
+        db = LocatorDB()
+        try:
+            async with Crawler(db, headless=True) as crawler:
+                print("Crawler initialized. Running smoke test...")
+                results = await crawler.bulk_crawl(["https://example.com"])
+                print(f"Crawled {len(results)} URLs.")
+        except Exception as e:
+            print(f"Smoke test failed: {e}")
+        finally:
+            db.close()
+
+    asyncio.run(test())

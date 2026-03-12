@@ -1,0 +1,77 @@
+{
+  "test_id": "TC003_place_order",
+  "name": "User can place order",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://practicesoftwaretesting.com/checkout"
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "street"
+      },
+      "element_id": "",
+      "value": "123 Main St"
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "city"
+      },
+      "element_id": "",
+      "value": "Anytown"
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "state"
+      },
+      "element_id": "",
+      "value": "CA"
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "postal_code"
+      },
+      "element_id": "",
+      "value": "12345"
+    },
+    {
+      "action": "select",
+      "selector": {
+        "strategy": "testid",
+        "value": "payment-method"
+      },
+      "element_id": "",
+      "value": "Credit Card"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "proceed-3"
+      },
+      "element_id": ""
+    }
+  ],
+  "assertions": [
+    {
+      "type": "url_contains",
+      "value": "/checkout",
+      "_auto_fixed": true,
+      "_original_value": "/order-confirmation"
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-11T20:12:05.648481+00:00",
+    "locators": 356,
+    "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
+  }
+}

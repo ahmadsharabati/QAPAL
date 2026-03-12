@@ -1,0 +1,33 @@
+{
+  "test_id": "TC004_product_information",
+  "name": "User can view product information",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://practicesoftwaretesting.com/product/01KKCNBX0EAJTMACG21BP6M9E7"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "role",
+        "value": {
+          "role": "link",
+          "name": "More information"
+        }
+      },
+      "element_id": null
+    }
+  ],
+  "assertions": [
+    {
+      "type": "url_equals",
+      "value": "https://practicesoftwaretesting.com/product/01KKCNBX0EAJTMACG21BP6M9E7"
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-11T18:22:42.920981+00:00",
+    "locators": 348,
+    "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "test_id": "TC004_checkout",
+  "name": "User can complete checkout",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://practicesoftwaretesting.com/auth/login"
+    },
+    {
+      "action": "fill",
+      "selector": {"strategy": "testid", "value": "email"},
+      "value": "customer2@practicesoftwaretesting.com"
+    },
+    {
+      "action": "fill",
+      "selector": {"strategy": "testid", "value": "password"},
+      "value": "welcome01"
+    },
+    {
+      "action": "click",
+      "selector": {"strategy": "testid", "value": "login-submit"}
+    },
+    {
+      "action": "navigate",
+      "url": "https://practicesoftwaretesting.com/category/hand-tools"
+    },
+    {
+      "action": "click",
+      "selector": {"strategy": "testid_prefix", "value": "product-", "index": 0}
+    },
+    {
+      "action": "click",
+      "selector": {"strategy": "testid", "value": "add-to-cart"},
+      "timeout": 15000
+    },
+    {
+      "action": "click",
+      "selector": {"strategy": "testid", "value": "nav-cart"}
+    },
+    {
+      "action": "click",
+      "selector": {"strategy": "testid", "value": "proceed-1"},
+      "timeout": 15000
+    },
+    {
+      "action": "click",
+      "selector": {"strategy": "testid", "value": "proceed-2"},
+      "timeout": 15000
+    },
+    {
+      "action": "fill",
+      "selector": {"strategy": "testid", "value": "street"},
+      "value": "123 Main St",
+      "timeout": 15000
+    },
+    {
+      "action": "fill",
+      "selector": {"strategy": "testid", "value": "city"},
+      "value": "Anytown"
+    },
+    {
+      "action": "fill",
+      "selector": {"strategy": "testid", "value": "state"},
+      "value": "CA"
+    },
+    {
+      "action": "fill",
+      "selector": {"strategy": "testid", "value": "country"},
+      "value": "United States"
+    },
+    {
+      "action": "fill",
+      "selector": {"strategy": "testid", "value": "postal_code"},
+      "value": "12345"
+    },
+    {
+      "action": "click",
+      "selector": {"strategy": "testid", "value": "proceed-3"},
+      "timeout": 15000
+    },
+    {
+      "action": "click",
+      "selector": {"strategy": "testid", "value": "finish"},
+      "timeout": 15000
+    }
+  ],
+  "assertions": [
+    {
+      "type": "url_contains",
+      "value": "/checkout"
+    }
+  ],
+  "_meta": {
+    "source": "manual",
+    "planned_at": "2026-03-12T12:21:22.206941+00:00",
+    "locators": 347,
+    "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
+  }
+}

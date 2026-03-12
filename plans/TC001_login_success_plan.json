@@ -1,0 +1,54 @@
+{
+  "test_id": "TC001_login_success",
+  "name": "User can log in successfully",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://practicesoftwaretesting.com/auth/login"
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "email"
+      },
+      "element_id": "email",
+      "value": "customer@practicesoftwaretesting.com",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "password"
+      },
+      "element_id": "password",
+      "value": "welcome01",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "login-submit"
+      },
+      "element_id": "login-submit",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    }
+  ],
+  "assertions": [
+    {
+      "type": "url_equals",
+      "value": "https://practicesoftwaretesting.com/account"
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-11T19:49:40.524534+00:00",
+    "locators": 356,
+    "ai_model": "openai/gpt-oss-120b"
+  }
+}

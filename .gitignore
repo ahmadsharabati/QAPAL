@@ -1,0 +1,23 @@
+# Dot files / hidden dirs
+.*
+!.gitignore
+
+# Environment & secrets
+toolbox_creds.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Data files (large / runtime-generated)
+locators.json
+reports/
+
+# Old plan archives
+plans_final_v*/
+plans_verification/

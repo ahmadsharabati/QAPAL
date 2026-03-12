@@ -1,0 +1,174 @@
+{
+  "test_id": "TC005_checkout",
+  "name": "User can complete checkout flow",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://practicessoftwaretesting.com/auth/login"
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "email"
+      },
+      "element_id": "elem15",
+      "value": "customer3@practicessoftwaretesting.com",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "password"
+      },
+      "element_id": "elem16",
+      "value": "pass123",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "login-submit"
+      },
+      "element_id": "elem17",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid_prefix",
+        "value": "product-",
+        "index": 0
+      },
+      "element_id": "elem18",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "add-to-cart"
+      },
+      "element_id": "elem19",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "nav-cart"
+      },
+      "element_id": "elem20",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "proceed-3"
+      },
+      "element_id": "elem21",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "street"
+      },
+      "element_id": "elem22",
+      "value": "123 Tool St",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "city"
+      },
+      "element_id": "elem23",
+      "value": "Toolville",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "state"
+      },
+      "element_id": "elem24",
+      "value": "TX",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "postal_code"
+      },
+      "element_id": "elem25",
+      "value": "75001",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "country"
+      },
+      "element_id": "elem26",
+      "value": "USA",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "select",
+      "selector": {
+        "strategy": "testid",
+        "value": "payment-method"
+      },
+      "element_id": "elem27",
+      "value": "Credit Card",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "finish"
+      },
+      "element_id": "elem28",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    }
+  ],
+  "assertions": [
+    {
+      "type": "element_exists",
+      "selector": {
+        "strategy": "testid",
+        "value": "finish"
+      }
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-11T19:30:57.117765+00:00",
+    "locators": 372,
+    "ai_model": "openai/gpt-oss-120b"
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "test_id": "TC005_search_product",
+  "name": "User can search for a product",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://practicesoftwaretesting.com/"
+    },
+    {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "search-query"
+      },
+      "element_id": "03f9571f48a61edc",
+      "value": "Pliers"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "search-submit"
+      },
+      "element_id": "c200f02c940eb755"
+    }
+  ],
+  "assertions": [
+    {
+      "type": "url_contains",
+      "value": "/"
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-11T18:22:42.922387+00:00",
+    "locators": 348,
+    "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
+  }
+}

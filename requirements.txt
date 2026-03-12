@@ -1,0 +1,17 @@
+# QAPal Dependencies
+
+# Playwright for browser automation
+playwright>=1.40.0
+
+# TinyDB for locator storage
+tinydb>=4.8.0
+
+# AI Providers (install as needed)
+anthropic>=0.18.0
+openai>=1.0.0
+
+# Optional utilities
+python-dotenv>=1.0.0
+
+# Semantic context extraction (optional — falls back to a11y snapshot if not installed)
+crawl4ai>=0.3.0

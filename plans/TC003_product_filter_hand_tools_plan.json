@@ -1,0 +1,70 @@
+{
+  "test_id": "TC003_product_filter_hand_tools",
+  "name": "User can filter Hand Tools and see product list",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://practicesoftwaretesting.com"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "nav-hand-tools"
+      },
+      "element_id": "nav-hand-tools",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "filters"
+      },
+      "element_id": "filters",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "check",
+      "selector": {
+        "strategy": "testid",
+        "value": "eco-friendly-filter"
+      },
+      "element_id": "eco-friendly-filter",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    },
+    {
+      "action": "check",
+      "selector": {
+        "strategy": "testid_prefix",
+        "value": "category-",
+        "index": 0
+      },
+      "element_id": "category-0",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    }
+  ],
+  "assertions": [
+    {
+      "type": "element_visible",
+      "selector": {
+        "strategy": "testid_prefix",
+        "value": "product-",
+        "index": 0
+      },
+      "element_id": "product-0",
+      "_invalid_element_id": true,
+      "_needs_review": true
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-11T19:49:40.529324+00:00",
+    "locators": 356,
+    "ai_model": "openai/gpt-oss-120b"
+  }
+}
