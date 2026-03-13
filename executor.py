@@ -650,7 +650,29 @@ async def _execute_step(
             if val is None: val = step.get("text")
             if val is None:
                 return _step_fail(step, "fill requires a value"), page_url
-            await loc.fill(str(val), timeout=timeout)
+            # Generic: if the resolved element is a <select>, route through select_option
+            # so plans that use `fill` on dropdowns still work correctly.
+            try:
+                el_tag = await loc.evaluate("el => el.tagName.toLowerCase()")
+            except Exception:
+                el_tag = ""
+            if el_tag == "select":
+                val_str = str(val)
+                selected = False
+                for attempt in range(2):
+                    try:
+                        if attempt == 0:
+                            await loc.select_option(value=val_str, timeout=3000)
+                        else:
+                            await loc.select_option(label=val_str, timeout=3000)
+                        selected = True
+                        break
+                    except Exception:
+                        pass
+                if not selected:
+                    await loc.select_option(label=val_str, timeout=timeout)  # raise real error
+            else:
+                await loc.fill(str(val), timeout=timeout)
 
         elif action == "type":
             text  = step.get("text") or step.get("value", "")

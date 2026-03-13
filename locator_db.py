@@ -43,6 +43,15 @@ except ImportError:
 
 MISS_THRESHOLD = int(os.getenv("LOCATOR_MISS_THRESHOLD", "3"))
 
+# ── Shared regex ──────────────────────────────────────────────────────
+# Matches trailing dynamic ID suffixes: ULID (26 base32 chars), UUID, or long hex (>=16).
+# Imported by generator.py and planner.py — single source of truth.
+DYNAMIC_ID_RE = re.compile(
+    r"[-/]([0-9A-Za-z]{26}"
+    r"|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    r"|[0-9a-fA-F]{16,})$"
+)
+
 
 # ── Helpers ───────────────────────────────────────────────────────────
 

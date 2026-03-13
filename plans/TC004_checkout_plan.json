@@ -79,6 +79,12 @@
       "timeout": 15000
     },
     {
+      "action": "select",
+      "selector": {"strategy": "testid", "value": "payment-method"},
+      "label": "Credit Card",
+      "timeout": 15000
+    },
+    {
       "action": "click",
       "selector": {"strategy": "testid", "value": "finish"},
       "timeout": 15000

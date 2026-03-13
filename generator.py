@@ -10,19 +10,9 @@ import re
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from locator_db import LocatorDB
+from locator_db import LocatorDB, DYNAMIC_ID_RE as _DYNAMIC_ID_RE
 from planner import PlanningError, _format_locators, _format_semantic_contexts, _parse_plan
 from ai_client import AIClient
-
-# Regex that matches trailing dynamic ID suffixes: ULID (26 base32 chars), UUID, or long hex (>=16).
-# Supports both dash-separated testid values (product-01KKF...) and slash-separated URL segments
-# (/product/01KKF...). The separator character is included in the match start so that the prefix
-# (e.g. "product-" or "/product/") is preserved when stripping.
-_DYNAMIC_ID_RE = re.compile(
-    r"[-/]([0-9A-Za-z]{26}"
-    r"|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-    r"|[0-9a-fA-F]{16,})$"
-)
 
 
 _GENERATOR_SYSTEM = """You are a test automation engineer for QAPal, a deterministic UI test automation system.
@@ -65,6 +55,11 @@ SUPPORTED ACTIONS: navigate, click, fill, type, clear, press, select, check, unc
 SELECT: use "label" (visible text), not "value" (HTML attribute). E.g. "label":"Germany" not "value":"DE".
 
 AUTHENTICATED FLOWS: tests requiring login MUST start with: navigate login page → fill email → fill password → click submit.
+
+PREREQUISITE STATES: Every plan must be fully self-contained and runnable from a fresh browser with no prior state.
+  - If a page requires items in a cart (e.g. /checkout, /order), include: navigate to a product page → click add-to-cart BEFORE navigating to that page.
+  - If a page requires a completed prior step in a wizard (e.g. step 3 of 4), include ALL preceding steps from step 1.
+  - Never navigate directly to a mid-flow URL (checkout, confirmation, payment) without completing the prerequisite steps.
 
 SUPPORTED ASSERTION TYPES:
   url_equals, url_contains, element_exists, element_visible, element_hidden,
@@ -385,6 +380,103 @@ class TestGenerator:
 
         return {**plan, "assertions": fixed}
 
+    def _inject_login_if_missing(self, plan: dict, credentials: dict) -> dict:
+        """
+        Generic post-processor: if the plan visits an auth-required URL but has
+        no login sequence, prepend login steps automatically.
+
+        Auth-required URLs are detected via the nav graph: any URL that only
+        appears as a transition target FROM the login page (not reachable from
+        unauthenticated pages) is considered auth-only.
+
+        Works for any site — no site-specific URL patterns.
+        """
+        login_url = credentials.get("url", "")
+        username  = credentials.get("username", "")
+        password  = credentials.get("password", "")
+        if not (login_url and username and password):
+            return plan
+
+        steps = plan.get("steps", [])
+
+        # Detect existing login sequence: plan already has a fill on 'email'/'username'
+        # and a fill on 'password', so no injection needed.
+        has_login = any(
+            s.get("action") == "fill" and str(
+                (s.get("selector") or {}).get("value", "")
+                or (s.get("selector") or {}).get("value", {})
+            ).lower() in ("email", "username", "user", "user_email")
+            for s in steps
+        )
+        if has_login:
+            return plan
+
+        # Determine auth-only URL set from nav graph
+        auth_only_urls: set = set()
+        if self._state_graph:
+            from urllib.parse import urlparse
+            all_transitions = self._state_graph.all_transitions()
+            # Collect all URLs reachable WITHOUT going through the login page
+            publicly_reachable: set = set()
+            for t in all_transitions:
+                from_u = t.get("from_url", "")
+                to_u   = t.get("to_url", "")
+                if login_url not in from_u:
+                    publicly_reachable.add(to_u)
+            # Auth-only = reachable only via login transitions
+            for t in all_transitions:
+                to_u = t.get("to_url", "")
+                if to_u and to_u not in publicly_reachable:
+                    auth_only_urls.add(to_u)
+
+        # Check if any navigate step goes to an auth-only URL
+        needs_login = any(
+            s.get("action") == "navigate" and s.get("url", "") in auth_only_urls
+            for s in steps
+        )
+        if not needs_login:
+            return plan
+
+        # Find email/password testid names from the locator DB (generic discovery)
+        email_testid    = "email"
+        password_testid = "password"
+        submit_testid   = "login-submit"
+        if self._db:
+            from tinydb import Query as _Q
+            _q = _Q()
+            login_locs = self._db._locs.search(
+                _q.url.test(lambda u: login_url in u)
+            )
+            for loc in login_locs:
+                chains = loc.get("locators", {}).get("chain", [])
+                identity = loc.get("identity", {})
+                tag  = identity.get("tag", "")
+                role = identity.get("role", "")
+                name = identity.get("name", "").lower()
+                for c in chains:
+                    if c.get("strategy") == "testid":
+                        v = c["value"]
+                        if tag == "input" and role == "textbox" and any(
+                            kw in name for kw in ("email", "user", "login", "identifier")
+                        ):
+                            email_testid = v
+                        elif tag == "input" and role in ("textbox", "") and "password" in name:
+                            password_testid = v
+                        elif tag == "button" and any(
+                            kw in name for kw in ("login", "sign in", "submit", "log in")
+                        ):
+                            submit_testid = v
+
+        login_steps = [
+            {"action": "navigate",  "url": login_url},
+            {"action": "fill",      "selector": {"strategy": "testid", "value": email_testid},    "value": username},
+            {"action": "fill",      "selector": {"strategy": "testid", "value": password_testid}, "value": password},
+            {"action": "click",     "selector": {"strategy": "testid", "value": submit_testid}},
+        ]
+        print(f"  ↪ [auto-inject] login steps prepended to {plan.get('test_id')} "
+              f"(auth-only URL detected)")
+        return {**plan, "steps": login_steps + steps}
+
     def _parse_plans(self, text: str, locator_map: dict, base_url: str = "") -> List[dict]:
         text = text.strip()
         if "```" in text:
@@ -476,6 +568,11 @@ class TestGenerator:
                 # Fix URL assertions using nav-graph URL tracking
                 if self._state_graph:
                     plan_data = self._fix_url_assertions(plan_data)
+
+                # Generic: inject login steps if plan visits an auth-only URL
+                # without a login sequence (works for any site with credentials).
+                if credentials:
+                    plan_data = self._inject_login_if_missing(plan_data, credentials)
 
                 plan_data["_meta"] = {
                     "source":      "prd_generator",

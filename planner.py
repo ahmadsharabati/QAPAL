@@ -26,7 +26,7 @@ import re
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from locator_db import LocatorDB, _normalize_url
+from locator_db import LocatorDB, _normalize_url, DYNAMIC_ID_RE as _LIST_ITEM_ID_RE
 from ai_client import AIClient
 
 try:
@@ -132,13 +132,6 @@ Reasoning:
 
 
 # ── Locator formatter ─────────────────────────────────────────────────
-
-_LIST_ITEM_ID_RE = re.compile(
-    r"[-/]([0-9A-Za-z]{26}"
-    r"|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-    r"|[0-9a-fA-F]{16,})$"
-)
-
 
 def _prune_list_items(locators: List[dict]) -> List[dict]:
     """Collapse repeated list-item locators that share the same testid prefix.
