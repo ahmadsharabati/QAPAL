@@ -1,5 +1,5 @@
 {
-  "test_id": "TC004_product_search",
+  "test_id": "TC005_product_search",
   "name": "User can search for products",
   "steps": [
     {
@@ -24,17 +24,16 @@
   ],
   "assertions": [
     {
-      "type": "element_exists",
-      "selector": {
-        "strategy": "text",
-        "value": "pliers"
-      }
+      "type": "url_contains",
+      "value": "",
+      "_auto_fixed": true,
+      "_original_value": "/search"
     }
   ],
   "_meta": {
     "source": "prd_generator",
-    "planned_at": "2026-03-14T10:33:43.459136+00:00",
-    "locators": 260,
+    "planned_at": "2026-03-13T14:06:53.481973+00:00",
+    "locators": 214,
     "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
   }
 }

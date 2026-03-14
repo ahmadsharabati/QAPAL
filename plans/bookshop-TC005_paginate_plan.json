@@ -1,0 +1,34 @@
+{
+  "test_id": "bookshop-TC005_paginate",
+  "name": "User can navigate to next page",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://books.toscrape.com/"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "role",
+        "value": "link",
+        "parameters": {
+          "name": "Next"
+        }
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "type": "url_contains",
+      "value": "/index.html",
+      "_auto_fixed": true,
+      "_original_value": "/catalogue/page-2"
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-14T17:41:21.712329+00:00",
+    "locators": 2430,
+    "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
+  }
+}

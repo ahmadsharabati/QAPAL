@@ -21,6 +21,7 @@ Environment variables (see .env.example):
 import argparse
 import asyncio
 import json
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -339,6 +340,13 @@ async def cmd_prd_run(args):
     # 1. Crawl — populates locator DB
     spider = getattr(args, "spider", False)
     depth  = getattr(args, "depth", 2)
+
+    # Auto-spider when the nav graph is nearly empty (first run on a new site).
+    # This ensures the AI has enough locator context to generate accurate plans.
+    if not spider and sg.stats().get("unique_pages", 0) < 3:
+        print(f"\n [auto] Nav graph is sparse — enabling --spider for first-run discovery.")
+        spider = True
+
     print(f"\n [1/5] Crawling {len(urls)} URL(s) to gather active locators{'  [spider mode]' if spider else ''}...")
     async with Crawler(db, headless=headless_mode, credentials=credentials) as crawler:
         if spider:
@@ -354,7 +362,9 @@ async def cmd_prd_run(args):
     processed = await _extract_semantics(db, urls, headless=headless_bool)
     print(f"   semantic contexts saved: {processed}/{len(urls)}")
 
-    generator = TestGenerator(db, ai_client=ai, max_cases=args.max_cases, state_graph=sg, max_locators=400)
+    num_tests = getattr(args, "num_tests", None)
+    generator = TestGenerator(db, ai_client=ai, max_cases=args.max_cases, state_graph=sg,
+                              max_locators=400, num_tests=num_tests)
     output_dir = Path(args.output or "plans")
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -377,6 +387,12 @@ async def cmd_prd_run(args):
             print(f"Error generating plans for {prd_path.name}: {e}")
             continue
 
+        # Derive a slug from the PRD filename to prefix plan IDs, preventing
+        # plans from different PRDs overwriting each other (e.g. both start at TC001).
+        # "bookshop_prd.md" → "bookshop", "toolbox.md" → "toolbox"
+        prd_slug = re.sub(r"[_\-]prd$", "", prd_path.stem, flags=re.IGNORECASE)
+        prd_slug = re.sub(r"[^a-zA-Z0-9]+", "-", prd_slug).strip("-").lower()
+
         valid_plans = []
         print("\n   Generated Plans:")
         for p in plans:
@@ -384,6 +400,11 @@ async def cmd_prd_run(args):
             if p.get("_planning_error"):
                 print(f"  ✗ {tc_id}  {p['_planning_error']}")
             else:
+                # Prefix test_id with slug if not already prefixed
+                if prd_slug and not tc_id.startswith(prd_slug):
+                    prefixed_id = f"{prd_slug}-{tc_id}"
+                    p = {**p, "test_id": prefixed_id}
+                    tc_id = prefixed_id
                 path = output_dir / f"{tc_id}_plan.json"
                 with open(path, "w") as f:
                     json.dump(p, f, indent=2)
@@ -454,7 +475,7 @@ async def cmd_graph_crawl(args):
     urls        = args.urls
     max_pages   = args.max_pages
     depth       = args.depth
-    headless    = True if args.headless else True
+    headless    = bool(args.headless)
     credentials = _load_credentials(args)
 
     db = LocatorDB()
@@ -501,7 +522,7 @@ async def cmd_graph_crawl(args):
                 # Extract all same-domain links and record transitions
                 hrefs = await page.eval_on_selector_all(
                     "a[href]",
-                    "els => els.map(e => ({href: e.href, text: (e.textContent||'').trim().slice(0,60)}))"
+                    "els => els.map(e => ({href: e.href, text: (e.textContent||'').trim()}))"
                     ".filter(o => o.href && !o.href.startsWith('javascript') && !o.href.startsWith('mailto'))"
                 )
                 from urllib.parse import urlparse as _up
@@ -671,6 +692,8 @@ def main():
     p.add_argument("--force", "-f", action="store_true", help="Force re-crawl even if fresh")
     p.add_argument("--output", "-o", help="Output directory for plans (default: plans/)")
     p.add_argument("--max-cases", action="store_true", help="Generate the maximum amount of meaningful test cases")
+    p.add_argument("--num-tests", dest="num_tests", type=int, default=None, metavar="N",
+                   help="Generate exactly N test cases (overrides --max-cases; default: 5)")
     p.add_argument("--headless", "-H", action="store_true", help="Run browser in headless mode")
     p.add_argument("--credentials-file", dest="credentials_file", metavar="FILE",
                    help="JSON file with login credentials (url, username, password, selectors)")

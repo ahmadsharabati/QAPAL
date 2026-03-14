@@ -1,0 +1,40 @@
+{
+  "test_id": "bookshop-TC004_add_to_basket",
+  "name": "User can add book to basket",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://books.toscrape.com/"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "role",
+        "value": {
+          "role": "button",
+          "name": "Add to basket"
+        }
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "type": "url_contains",
+      "value": "/",
+      "_auto_fixed": true,
+      "_original_value": {
+        "strategy": "role",
+        "value": {
+          "role": "button",
+          "name": "Checkout"
+        }
+      }
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-14T17:41:21.712326+00:00",
+    "locators": 2430,
+    "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
+  }
+}

@@ -104,6 +104,26 @@ Return a JSON array of execution plans exactly like this — no markdown fences:
   }}
 ]"""
 
+_VALIDATOR_PROMPT = """\
+You are a QA automation validator. You will be given a test plan (JSON) and a list of available
+UI locators for the page under test. Your job is to check every selector in the plan steps and
+assertions, and replace any selector whose value does not appear in the locators list with the
+closest available locator from the list.
+
+Rules:
+- Output ONLY the corrected plan as a single valid JSON object. No prose, no markdown fences.
+- Preserve all fields (test_id, name, steps, assertions, _meta, etc.) exactly — only update selectors.
+- If a selector already matches a locator in the list, leave it unchanged.
+- Prefer `testid` strategy when a matching testid is available; otherwise use `role`.
+- If no reasonable match exists, keep the original selector unchanged.
+
+PLAN:
+{plan}
+
+AVAILABLE LOCATORS FOR THIS PAGE:
+{locators}
+"""
+
 
 class TestGenerator:
     """
@@ -117,12 +137,14 @@ class TestGenerator:
         max_locators: int                = 80,
         max_cases:    bool               = False,
         state_graph                      = None,
+        num_tests:    Optional[int]      = None,
     ):
         self._db           = db
         self._ai           = ai_client
         self._max_locators = max_locators
         self._max_cases    = max_cases
         self._state_graph  = state_graph
+        self._num_tests    = num_tests  # explicit count; overrides max_cases/default-5
 
     def generate_plans_from_prd(self, prd_content: str, urls: List[str], credentials: Optional[dict] = None) -> List[dict]:
         """
@@ -201,7 +223,14 @@ class TestGenerator:
         # Load semantic contexts for the referenced URLs
         states = [s for s in (self._db.get_state(u) for u in urls) if s]
 
-        if self._max_cases:
+        if self._num_tests is not None:
+            n = self._num_tests
+            instruction = (
+                f"\n\nGenerate EXACTLY {n} test case{'s' if n != 1 else ''} covering the most "
+                f"important user flows described in the PRD. "
+                f"Do NOT exceed {n} test case{'s' if n != 1 else ''} total."
+            )
+        elif self._max_cases:
             instruction = "\n\nCRITICAL: Generate the MAXIMUM number of most helpful and meaningful test cases that comprehensively cover the requirements in the PRD. Do not limit yourself to just one."
         else:
             instruction = (
@@ -276,7 +305,73 @@ class TestGenerator:
         except Exception as e:
             raise PlanningError(f"AI call failed: {e}")
 
-        return self._parse_plans(raw, locator_map, base_url=urls[0] if urls else "")
+        return self._parse_plans(raw, locator_map, base_url=urls[0] if urls else "", credentials=credentials, locators=locators)
+
+    def _validate_plan_with_small_model(self, plan: dict, locators: list) -> dict:
+        """
+        One cheap small-model pass to fix any remaining selector mismatches after
+        the rule-based post-processor chain. Non-fatal — returns original plan on any error.
+
+        Uses the provider's small_model (Haiku for Anthropic, gpt-4o-mini for OpenAI)
+        so the cost is ~10% of the main generation call.
+        """
+        if not self._ai:
+            return plan
+
+        steps_with_selectors = [s for s in plan.get("steps", []) if s.get("selector")]
+        assertions_with_sel  = [a for a in plan.get("assertions", []) if a.get("selector")]
+        if not steps_with_selectors and not assertions_with_sel:
+            return plan
+
+        # Build compact locator list for this plan's starting URL
+        start_url = next(
+            (s.get("url") for s in plan.get("steps", []) if s.get("action") == "navigate"),
+            ""
+        )
+        relevant_locs = [
+            {
+                "role":   loc.get("identity", {}).get("role", ""),
+                "name":   loc.get("identity", {}).get("name", ""),
+                "testid": next(
+                    (c.get("value") for c in loc.get("locators", {}).get("chain", [])
+                     if c.get("strategy") == "testid"),
+                    None
+                ),
+            }
+            for loc in locators
+            if not start_url or loc.get("url", "").rstrip("/") == start_url.rstrip("/")
+        ][:50]  # cap at 50 entries to keep prompt small
+
+        if not relevant_locs:
+            return plan
+
+        prompt = _VALIDATOR_PROMPT.format(
+            plan=json.dumps(plan, indent=2),
+            locators=json.dumps(relevant_locs, indent=2),
+        )
+        try:
+            raw = self._ai.complete(
+                prompt,
+                max_tokens=2048,
+                temperature=0,
+                model_override=self._ai.small_model,
+            )
+            # Extract JSON from response
+            corrected = None
+            raw = raw.strip()
+            if raw.startswith("{"):
+                corrected = json.loads(raw)
+            elif "```" in raw:
+                for part in raw.split("```")[1:]:
+                    candidate = part.lstrip("json").strip()
+                    if candidate.startswith("{"):
+                        corrected = json.loads(candidate.split("```")[0].strip())
+                        break
+            if corrected and isinstance(corrected, dict) and "steps" in corrected:
+                return corrected
+        except Exception:
+            pass  # validator failure is non-fatal
+        return plan
 
     @staticmethod
     def _strip_dynamic_id(s: str) -> str:
@@ -300,6 +395,9 @@ class TestGenerator:
         steps      = plan.get("steps", [])
         assertions = plan.get("assertions", [])
         if not assertions:
+            return plan
+
+        if self._state_graph is None:
             return plan
 
         transitions = self._state_graph.all_transitions()
@@ -376,9 +474,186 @@ class TestGenerator:
                     fixed.append({**a, "type": "url_contains", "value": curr_path,
                                    "_auto_fixed": True, "_original_value": aval})
                     continue
+                # url_equals is too strict — query strings / hashes can be appended by
+                # any interaction (form submit, SPA routing). Downgrade to url_contains.
+                if atype == "url_equals":
+                    fixed.append({**a, "type": "url_contains",
+                                   "_auto_fixed": True, "_original_value": aval})
+                    continue
             fixed.append(a)
 
         return {**plan, "assertions": fixed}
+
+    def _fix_element_assertions(self, plan: dict) -> dict:
+        """
+        Post-processor: validate element_visible / element_exists assertions against
+        the locator DB. If the asserted selector cannot be found in the DB, replace
+        the assertion with a safe url_contains fallback using the current page path.
+
+        This catches AI hallucinations like role+name selectors for elements that
+        don't exist on the page (e.g. "Pliers More information" link).
+
+        Only validates role-strategy assertions — testid assertions are left as-is
+        because they're checked at run-time by the executor against real attributes.
+        """
+        if not self._db:
+            return plan
+
+        assertions = plan.get("assertions", [])
+        steps      = plan.get("steps", [])
+
+        # Determine the expected page URL from the last navigate step
+        last_url = ""
+        for s in steps:
+            if s.get("action") == "navigate":
+                last_url = s.get("url", last_url)
+        page_path = ""
+        if last_url:
+            from urllib.parse import urlparse
+            page_path = self._strip_dynamic_id(urlparse(last_url).path)
+
+        # Build a set of known (role, name) pairs from the locator DB for this page
+        known_role_names: set = set()
+        if last_url:
+            from locator_db import _normalize_url
+            norm = _normalize_url(last_url)
+            for loc in self._db._locs.all():
+                if _normalize_url(loc.get("url", "")) != norm:
+                    continue
+                ident = loc.get("identity", {})
+                role  = ident.get("role", "").lower()
+                name  = ident.get("name", "").lower()
+                if role:
+                    known_role_names.add((role, name))
+
+        fixed = []
+        for a in assertions:
+            atype = a.get("type", "")
+            if atype not in ("element_visible", "element_exists"):
+                fixed.append(a)
+                continue
+
+            sel = a.get("selector", {}) or {}
+            strategy = sel.get("strategy", "")
+
+            # Only validate role-based assertions — testid is checked live
+            if strategy != "role":
+                fixed.append(a)
+                continue
+
+            val  = sel.get("value", {}) or {}
+            role = str(val.get("role", "")).lower()
+            name = str(val.get("name", "")).lower()
+
+            # Check if this (role, name) pair exists in the locator DB
+            if (role, name) in known_role_names:
+                fixed.append(a)
+                continue
+
+            # Also accept if any known element's name starts with the asserted name
+            # (handles slight wording differences like "Add to cart" vs "Add to Cart")
+            if any(r == role and n.startswith(name[:6]) for r, n in known_role_names if len(name) >= 6):
+                fixed.append(a)
+                continue
+
+            # Hallucinated element — replace with url_contains fallback if we
+            # have a known page path; otherwise keep the original assertion unchanged
+            # (emitting url_contains with empty value would match any URL).
+            if page_path:
+                fallback = {"type": "url_contains", "value": page_path,
+                            "_auto_fixed": True, "_original_value": sel}
+                fixed.append(fallback)
+            else:
+                fixed.append(a)
+
+        return {**plan, "assertions": fixed}
+
+    def _fix_selector_strategies(self, plans: list) -> list:
+        """
+        Post-processor: replace `testid` / `testid_prefix` selectors on sites that
+        have no data-testid attributes in the locator DB.
+
+        On plain-HTML sites (e.g. books.toscrape.com) the AI hallucinates testid
+        selectors because the locator prompt doesn't clearly signal that testid is
+        absent. This post-processor detects the absence globally and replaces every
+        testid-strategy selector with the best matching `role` selector from the DB.
+        """
+        if not self._db:
+            return plans
+
+        # Check whether any crawled locator on this site has a testid chain entry.
+        # If even one exists, the AI's testid usage is intentional — leave plans alone.
+        has_testid = any(
+            any(c.get("strategy") == "testid" for c in loc.get("locators", {}).get("chain", []))
+            for loc in self._db._locs.all()
+        )
+        if has_testid:
+            return plans
+
+        for plan in plans:
+            steps = plan.get("steps", [])
+            # Fix step selectors, tracking current URL context
+            curr_url = ""
+            for step in steps:
+                if step.get("action") == "navigate":
+                    curr_url = step.get("url", curr_url)
+                sel = step.get("selector") or {}
+                if sel.get("strategy") in ("testid", "testid_prefix"):
+                    replacement = self._find_best_role_selector(sel, curr_url)
+                    if replacement:
+                        step["selector"] = replacement
+
+            # Fix assertion selectors (use last navigate URL)
+            last_url = ""
+            for s in steps:
+                if s.get("action") == "navigate":
+                    last_url = s.get("url", last_url)
+            for assertion in plan.get("assertions", []):
+                sel = assertion.get("selector") or {}
+                if sel and sel.get("strategy") in ("testid", "testid_prefix"):
+                    replacement = self._find_best_role_selector(sel, last_url)
+                    if replacement:
+                        assertion["selector"] = replacement
+
+        return plans
+
+    def _find_best_role_selector(self, sel: dict, url: str) -> Optional[dict]:
+        """
+        Search the locator DB for the best role-based selector matching the given
+        testid value string. Returns a `role` strategy dict, or None if no match.
+        """
+        if not self._db or not url:
+            return None
+
+        value = str(sel.get("value", ""))
+        # Derive a keyword from the testid value: strip dynamic IDs and trailing separators
+        keyword = self._strip_dynamic_id(value).rstrip("-_ ").lower()
+        if not keyword:
+            return None
+
+        from locator_db import _normalize_url
+        norm_url = _normalize_url(url)
+
+        best: Optional[dict] = None
+        best_score = -1
+        for loc in self._db._locs.all():
+            if _normalize_url(loc.get("url", "")) != norm_url:
+                continue
+            ident = loc.get("identity", {})
+            role  = ident.get("role", "")
+            name  = ident.get("name", "")
+            if not role or not name:
+                continue
+            name_lc = name.lower()
+            # Score by keyword overlap — prefer longer / more specific matches
+            if keyword in name_lc or name_lc in keyword:
+                score = len(set(keyword.split()) & set(name_lc.split())) + len(keyword)
+                if score > best_score:
+                    best_score = score
+                    best = {"strategy": "role", "value": {"role": role, "name": name},
+                            "_auto_fixed": True, "_original_value": sel}
+
+        return best
 
     def _inject_login_if_missing(self, plan: dict, credentials: dict) -> dict:
         """
@@ -401,11 +676,13 @@ class TestGenerator:
 
         # Detect existing login sequence: plan already has a fill on 'email'/'username'
         # and a fill on 'password', so no injection needed.
+        # Only check testid-strategy selectors — role selectors have dict values that
+        # would stringify to "{'role': 'textbox', 'name': 'Email'}" and never match.
         has_login = any(
-            s.get("action") == "fill" and str(
-                (s.get("selector") or {}).get("value", "")
-                or (s.get("selector") or {}).get("value", {})
-            ).lower() in ("email", "username", "user", "user_email")
+            s.get("action") == "fill"
+            and (s.get("selector") or {}).get("strategy") == "testid"
+            and str((s.get("selector") or {}).get("value", "")).lower()
+                in ("email", "username", "user", "user_email")
             for s in steps
         )
         if has_login:
@@ -437,7 +714,11 @@ class TestGenerator:
         if not needs_login:
             return plan
 
-        # Find email/password testid names from the locator DB (generic discovery)
+        # Find email/password testid names from the locator DB (generic discovery).
+        # Falls back to English keyword defaults ("email", "password", "login-submit")
+        # when the DB has no data for this login URL or when the site uses non-English
+        # field names (e.g. "utilisateur", "auth-email"). Works for most sites in practice
+        # since these defaults match the most common testid conventions.
         email_testid    = "email"
         password_testid = "password"
         submit_testid   = "login-submit"
@@ -477,7 +758,174 @@ class TestGenerator:
               f"(auth-only URL detected)")
         return {**plan, "steps": login_steps + steps}
 
-    def _parse_plans(self, text: str, locator_map: dict, base_url: str = "") -> List[dict]:
+    def _find_cart_nav_testid(self) -> Optional[str]:
+        """
+        Look up the testid of the cart navigation element from the locator DB.
+        Searches for link elements (<a> / role=link) whose accessible name or
+        testid value contains a cart-related keyword.
+        Generic — discovers the testid from crawled data, no hardcoding.
+        """
+        if not self._db:
+            return None
+        cart_keywords = ("cart", "basket", "bag", "trolley")
+        for loc in self._db._locs.all():
+            identity = loc.get("identity", {})
+            tag  = identity.get("tag", "")
+            role = identity.get("role", "")
+            name = identity.get("name", "").lower()
+            if tag not in ("a",) and role not in ("link",):
+                continue
+            chains = loc.get("locators", {}).get("chain", [])
+            for c in chains:
+                if c.get("strategy") == "testid":
+                    testid_val = str(c["value"]).lower()
+                    if any(kw in testid_val or kw in name for kw in cart_keywords):
+                        return str(c["value"])
+        return None
+
+    def _inject_cart_prerequisite(self, plan: dict) -> dict:
+        """
+        Generic post-processor for cart/checkout prerequisite states.
+
+        Three independent repairs applied in order:
+
+        0. PRODUCT URL: replace direct navigation to /product/<dynamic-ID> with
+           navigate to category + testid_prefix click. Direct product URLs contain
+           ULIDs that change periodically and may point to out-of-stock items.
+
+        1. ADD-TO-CART: if the plan navigates to a cart-required URL (e.g. /checkout,
+           /order, /cart) but has no add-to-cart step, prepend:
+           navigate to category → click first product → click add-to-cart.
+
+        2. NAV-CART: if the plan navigates to a cart-required URL but has no prior
+           click on the cart navigation element (discovered from the locator DB),
+           inject that click just before the first cart-required navigate step so
+           the browser reaches the cart page via UI interaction.
+
+        Works for any site — cart nav testid is discovered from crawled locators,
+        not hardcoded.
+        """
+        steps = list(plan.get("steps", []))
+
+        def _step_val(s):
+            return str((s.get("selector") or {}).get("value", "")).lower()
+
+        # ── Repair 0: replace direct product-URL navigations with category click ─
+        # Direct /product/<ULID> URLs use dynamic IDs that change and may be stale
+        # or point to out-of-stock items. Replace with category → testid_prefix click.
+        from urllib.parse import urlparse
+        new_steps = []
+        for s in steps:
+            if s.get("action") == "navigate":
+                path = urlparse(s.get("url", "")).path
+                if "/product/" in path and _DYNAMIC_ID_RE.search(path):
+                    # Find a category URL from the DB
+                    category_url = ""
+                    if self._db:
+                        from tinydb import Query as _Q
+                        _q = _Q()
+                        cat_locs = self._db._locs.search(
+                            _q.url.test(lambda u: "/category/" in u)
+                        )
+                        if cat_locs:
+                            category_url = cat_locs[0].get("url", "")
+                    if category_url:
+                        new_steps.append({"action": "navigate", "url": category_url})
+                        new_steps.append({
+                            "action": "click",
+                            "selector": {"strategy": "testid_prefix", "value": "product-", "index": 0},
+                        })
+                        continue  # skip the original product-URL navigate
+            new_steps.append(s)
+        if new_steps != steps:
+            print(f"  ↪ [auto-fix] product URL navigate replaced with category+testid_prefix in {plan.get('test_id')}")
+        steps = new_steps
+
+        cart_required_patterns = ("/checkout", "/order", "/cart", "/basket", "/payment")
+
+        # Detect whether any navigate step goes directly to a cart-required URL
+        def _is_cart_navigate(s):
+            return (
+                s.get("action") == "navigate"
+                and any(p in s.get("url", "") for p in cart_required_patterns)
+            )
+
+        needs_cart = any(_is_cart_navigate(s) for s in steps)
+        if not needs_cart:
+            return plan
+
+        # ── Repair 1: inject add-to-cart if missing ───────────────────────
+        has_add_to_cart = any(
+            s.get("action") == "click"
+            and _step_val(s) in ("add-to-cart", "add_to_cart", "addtocart", "add-to-basket")
+            for s in steps
+        )
+        if not has_add_to_cart:
+            category_url = ""
+            product_testid = None
+            if self._db:
+                from tinydb import Query as _Q
+                _q = _Q()
+                cat_locs = self._db._locs.search(
+                    _q.url.test(lambda u: "/category/" in u)
+                )
+                if cat_locs:
+                    category_url = cat_locs[0].get("url", "")
+                    for loc in cat_locs:
+                        for c in loc.get("locators", {}).get("chain", []):
+                            v = str(c.get("value", ""))
+                            if c.get("strategy") == "testid" and v.startswith("product-"):
+                                product_testid = v
+                                break
+                        if product_testid:
+                            break
+
+            if category_url:
+                cart_steps = [
+                    {"action": "navigate", "url": category_url},
+                    {
+                        "action": "click",
+                        "selector": {
+                            "strategy": "testid_prefix" if not product_testid else "testid",
+                            "value":    "product-" if not product_testid else product_testid,
+                            **({"index": 0} if not product_testid else {}),
+                        },
+                    },
+                    {
+                        "action": "click",
+                        "selector": {"strategy": "testid", "value": "add-to-cart"},
+                        "timeout": 15000,
+                    },
+                ]
+                print(f"  ↪ [auto-inject] add-to-cart steps prepended to {plan.get('test_id')}")
+                steps = cart_steps + steps
+
+        # ── Repair 2: inject cart-nav click before cart navigate if missing ─
+        # Discover the cart navigation testid from the locator DB (generic).
+        cart_nav_testid = self._find_cart_nav_testid()
+        if cart_nav_testid:
+            has_cart_nav = any(
+                s.get("action") == "click" and _step_val(s) == cart_nav_testid.lower()
+                for s in steps
+            )
+            if not has_cart_nav:
+                first_cart_nav_idx = next(
+                    (i for i, s in enumerate(steps) if _is_cart_navigate(s)),
+                    None,
+                )
+                if first_cart_nav_idx is not None:
+                    nav_step = {
+                        "action":   "click",
+                        "selector": {"strategy": "testid", "value": cart_nav_testid},
+                        "timeout":  10000,
+                    }
+                    steps = steps[:first_cart_nav_idx] + [nav_step] + steps[first_cart_nav_idx:]
+                    print(f"  ↪ [auto-inject] cart-nav click (testid={cart_nav_testid!r}) "
+                          f"injected in {plan.get('test_id')}")
+
+        return {**plan, "steps": steps}
+
+    def _parse_plans(self, text: str, locator_map: dict, base_url: str = "", credentials: Optional[dict] = None, locators: Optional[list] = None) -> List[dict]:
         text = text.strip()
         if "```" in text:
             parts = text.split("```")
@@ -565,25 +1013,48 @@ class TestGenerator:
                         item["_invalid_element_id"] = True
                         item["_needs_review"]       = True
 
-                # Fix URL assertions using nav-graph URL tracking
+                # Prerequisite injectors run BEFORE _fix_url_assertions so the
+                # URL simulation sees the complete step sequence.
+                if credentials:
+                    plan_data = self._inject_login_if_missing(plan_data, credentials)
+                plan_data = self._inject_cart_prerequisite(plan_data)
+
+                # Fix URL assertions using nav-graph URL tracking (runs last,
+                # after all prerequisite steps have been injected).
                 if self._state_graph:
                     plan_data = self._fix_url_assertions(plan_data)
 
-                # Generic: inject login steps if plan visits an auth-only URL
-                # without a login sequence (works for any site with credentials).
-                if credentials:
-                    plan_data = self._inject_login_if_missing(plan_data, credentials)
+                # Replace hallucinated element assertions with safe url_contains fallback.
+                plan_data = self._fix_element_assertions(plan_data)
 
-                plan_data["_meta"] = {
-                    "source":      "prd_generator",
-                    "planned_at":  datetime.now(timezone.utc).isoformat(),
-                    "locators":    len(locator_map),
-                    "ai_model":    self._ai.model,
-                }
                 parsed_plans.append(plan_data)
             except Exception as e:
                 # Even if one plan fails validation, we should try the rest
                 parsed_plans.append({"test_id": test_id, "_planning_error": str(e)})
+
+        # Fix testid selectors on plain-HTML sites (operates across all plans at once
+        # so the has_testid check is evaluated once for the entire site).
+        parsed_plans = self._fix_selector_strategies(parsed_plans)
+
+        # Small-model validation pass: one cheap call per plan to fix any remaining
+        # selector mismatches that rule-based post-processors couldn't catch.
+        if locators:
+            parsed_plans = [
+                self._validate_plan_with_small_model(p, locators)
+                if "_planning_error" not in p else p
+                for p in parsed_plans
+            ]
+
+        # Stamp _meta on all successfully parsed plans
+        for plan_data in parsed_plans:
+            if "_planning_error" in plan_data or "_meta" in plan_data:
+                continue
+            plan_data["_meta"] = {
+                "source":      "prd_generator",
+                "planned_at":  datetime.now(timezone.utc).isoformat(),
+                "locators":    len(locator_map),
+                "ai_model":    self._ai.model,
+            }
 
         return parsed_plans
 

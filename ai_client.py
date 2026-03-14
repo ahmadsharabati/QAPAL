@@ -45,12 +45,19 @@ class AIClient:
 
     # ── Sync ──────────────────────────────────────────────────────────
 
+    # Small model used for cheap validation / recovery passes.
+    # Subclasses may override; defaults to the main model.
+    @property
+    def small_model(self) -> str:
+        return self.model
+
     def complete(
         self,
-        prompt:        str,
-        system_prompt: Optional[str] = None,
-        max_tokens:    int           = 4096,
-        temperature:   float         = 0,
+        prompt:         str,
+        system_prompt:  Optional[str] = None,
+        max_tokens:     int           = 4096,
+        temperature:    float         = 0,
+        model_override: Optional[str] = None,
     ) -> str:
         raise NotImplementedError
 
@@ -59,15 +66,16 @@ class AIClient:
 
     async def acomplete(
         self,
-        prompt:        str,
-        system_prompt: Optional[str] = None,
-        max_tokens:    int           = 4096,
-        temperature:   float         = 0,
+        prompt:         str,
+        system_prompt:  Optional[str] = None,
+        max_tokens:     int           = 4096,
+        temperature:    float         = 0,
+        model_override: Optional[str] = None,
     ) -> str:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
-            lambda: self.complete(prompt, system_prompt, max_tokens, temperature),
+            lambda: self.complete(prompt, system_prompt, max_tokens, temperature, model_override),
         )
 
     # ── Factory ───────────────────────────────────────────────────────
@@ -139,10 +147,16 @@ class AIClient:
 
 class _AnthropicClient(AIClient):
 
+    _SMALL_MODEL = "claude-haiku-4-5-20251001"
+
     def __init__(self, api_key: str, model: str):
         super().__init__("anthropic", model)
         self._api_key = api_key
         self._client  = None
+
+    @property
+    def small_model(self) -> str:
+        return self._SMALL_MODEL
 
     def _get(self):
         if self._client is None:
@@ -152,14 +166,15 @@ class _AnthropicClient(AIClient):
 
     def complete(
         self,
-        prompt:        str,
-        system_prompt: Optional[str] = None,
-        max_tokens:    int           = 4096,
-        temperature:   float         = 0,
+        prompt:         str,
+        system_prompt:  Optional[str] = None,
+        max_tokens:     int           = 4096,
+        temperature:    float         = 0,
+        model_override: Optional[str] = None,
     ) -> str:
         client = self._get()
         kwargs = {
-            "model":       self.model,
+            "model":       model_override or self.model,
             "max_tokens":  max_tokens,
             "messages":    [{"role": "user", "content": prompt}],
             "temperature": temperature,
@@ -168,6 +183,8 @@ class _AnthropicClient(AIClient):
             kwargs["system"] = system_prompt
 
         response = client.messages.create(**kwargs)
+        if not response.content:
+            return ""
         return response.content[0].text
 
 
@@ -175,11 +192,23 @@ class _AnthropicClient(AIClient):
 
 class _OpenAIClient(AIClient):
 
+    # Small model for cheap validation / recovery — override per-call via model_override.
+    # For Groq/OpenAI-compat endpoints the same model is used (already lightweight).
+    _SMALL_MODEL_OPENAI = "gpt-4o-mini"
+
     def __init__(self, api_key: str, model: str, base_url: Optional[str] = None):
         super().__init__("openai", model)
         self._api_key  = api_key
         self._base_url = base_url
         self._client   = None
+
+    @property
+    def small_model(self) -> str:
+        # If using a custom endpoint (Groq, xAI, etc.) keep the same model — it's
+        # already a small/fast model chosen by the user.
+        if self._base_url:
+            return self.model
+        return self._SMALL_MODEL_OPENAI
 
     def _get(self):
         if self._client is None:
@@ -192,10 +221,11 @@ class _OpenAIClient(AIClient):
 
     def complete(
         self,
-        prompt:        str,
-        system_prompt: Optional[str] = None,
-        max_tokens:    int           = 4096,
-        temperature:   float         = 0,
+        prompt:         str,
+        system_prompt:  Optional[str] = None,
+        max_tokens:     int           = 4096,
+        temperature:    float         = 0,
+        model_override: Optional[str] = None,
     ) -> str:
         client   = self._get()
         messages = []
@@ -204,9 +234,11 @@ class _OpenAIClient(AIClient):
         messages.append({"role": "user", "content": prompt})
 
         response = client.chat.completions.create(
-            model       = self.model,
+            model       = model_override or self.model,
             max_tokens  = max_tokens,
             messages    = messages,
             temperature = temperature,
         )
-        return response.choices[0].message.content
+        if not response.choices:
+            return ""
+        return response.choices[0].message.content or ""

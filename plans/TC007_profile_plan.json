@@ -1,0 +1,43 @@
+{
+  "test_id": "TC007_profile",
+  "name": "User can view and access profile page",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://practicesoftwaretesting.com/auth/login"
+    },
+    {
+      "action": "fill",
+      "selector": {"strategy": "testid", "value": "email"},
+      "value": "customer2@practicesoftwaretesting.com"
+    },
+    {
+      "action": "fill",
+      "selector": {"strategy": "testid", "value": "password"},
+      "value": "welcome01"
+    },
+    {
+      "action": "click",
+      "selector": {"strategy": "testid", "value": "login-submit"}
+    },
+    {
+      "action": "navigate",
+      "url": "https://practicesoftwaretesting.com/account/profile",
+      "timeout": 10000
+    }
+  ],
+  "assertions": [
+    {
+      "type": "url_contains",
+      "value": "/account/profile"
+    },
+    {
+      "type": "element_visible",
+      "selector": {"strategy": "testid", "value": "update-profile-submit"}
+    }
+  ],
+  "_meta": {
+    "source": "manual",
+    "planned_at": "2026-03-13T00:00:00+00:00"
+  }
+}

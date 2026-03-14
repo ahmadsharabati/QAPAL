@@ -1,10 +1,10 @@
 {
-  "test_id": "TC005_product_details",
-  "name": "User can view product details",
+  "test_id": "bookshop-TC005_browse_next_page",
+  "name": "User can browse next page",
   "steps": [
     {
       "action": "navigate",
-      "url": "https://practicesoftwaretesting.com/product/01KKKMH1S71NCYQFAH9WMJ812K"
+      "url": "https://books.toscrape.com"
     }
   ],
   "assertions": [
@@ -14,15 +14,15 @@
         "strategy": "role",
         "value": {
           "role": "link",
-          "name": "Helinton Fantin"
+          "name": "next"
         }
       }
     }
   ],
   "_meta": {
     "source": "prd_generator",
-    "planned_at": "2026-03-13T14:18:44.842826+00:00",
-    "locators": 260,
+    "planned_at": "2026-03-14T12:50:12.622253+00:00",
+    "locators": 2426,
     "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
   }
 }

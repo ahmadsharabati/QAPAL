@@ -1,0 +1,38 @@
+{
+  "test_id": "bookshop-TC003_view_book_details",
+  "name": "User can view book details",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://books.toscrape.com"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "role",
+        "value": {
+          "role": "link",
+          "name": "Books to Scrape"
+        }
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "type": "element_visible",
+      "selector": {
+        "strategy": "role",
+        "value": {
+          "role": "button",
+          "name": "Add to basket"
+        }
+      }
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-14T12:53:21.127049+00:00",
+    "locators": 2426,
+    "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
+  }
+}

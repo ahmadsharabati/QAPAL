@@ -1,0 +1,40 @@
+{
+  "test_id": "TC002_filter_category",
+  "name": "User can filter by category",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://books.toscrape.com"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "role",
+        "value": {
+          "role": "link",
+          "name": "Mystery"
+        }
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "type": "url_contains",
+      "value": "",
+      "_auto_fixed": true,
+      "_original_value": {
+        "strategy": "role",
+        "value": {
+          "role": "link",
+          "name": "Add to basket"
+        }
+      }
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-14T11:10:11.710728+00:00",
+    "locators": 350,
+    "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
+  }
+}

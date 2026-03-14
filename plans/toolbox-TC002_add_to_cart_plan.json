@@ -1,5 +1,5 @@
 {
-  "test_id": "TC002_add_to_cart",
+  "test_id": "toolbox-TC002_add_to_cart",
   "name": "User can add product to cart",
   "steps": [
     {
@@ -9,16 +9,18 @@
     {
       "action": "click",
       "selector": {
-        "strategy": "testid_prefix",
-        "value": "product-",
-        "index": 0
+        "strategy": "testid",
+        "value": "product-01KKP3FV0NY59TQMVFHG2S7GH4"
       }
     },
     {
       "action": "click",
       "selector": {
-        "strategy": "testid",
-        "value": "add-to-cart"
+        "strategy": "role",
+        "value": {
+          "role": "button",
+          "name": "Add to cart"
+        }
       }
     }
   ],
@@ -32,8 +34,8 @@
   ],
   "_meta": {
     "source": "prd_generator",
-    "planned_at": "2026-03-14T10:33:43.454348+00:00",
-    "locators": 260,
+    "planned_at": "2026-03-14T17:47:08.962284+00:00",
+    "locators": 2427,
     "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
   }
 }

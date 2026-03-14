@@ -1,16 +1,16 @@
 {
-  "test_id": "TC003_product_filter",
-  "name": "User can filter products by category",
+  "test_id": "TC003_view_product",
+  "name": "User can view product details",
   "steps": [
     {
       "action": "navigate",
-      "url": "https://practicesoftwaretesting.com/category/hand-tools"
+      "url": "https://books.toscrape.com"
     },
     {
       "action": "click",
       "selector": {
         "strategy": "testid_prefix",
-        "value": "category-",
+        "value": "product-",
         "index": 0
       }
     }
@@ -19,16 +19,18 @@
     {
       "type": "element_visible",
       "selector": {
-        "strategy": "testid_prefix",
-        "value": "product-",
-        "index": 0
+        "strategy": "role",
+        "value": {
+          "role": "button",
+          "name": "Add to basket"
+        }
       }
     }
   ],
   "_meta": {
     "source": "prd_generator",
-    "planned_at": "2026-03-14T10:24:43.352940+00:00",
-    "locators": 260,
+    "planned_at": "2026-03-14T11:10:11.713604+00:00",
+    "locators": 350,
     "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
   }
 }

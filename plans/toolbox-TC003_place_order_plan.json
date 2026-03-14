@@ -1,6 +1,6 @@
 {
-  "test_id": "TC005_checkout",
-  "name": "User can checkout successfully",
+  "test_id": "toolbox-TC003_place_order",
+  "name": "User can place order",
   "steps": [
     {
       "action": "navigate",
@@ -10,7 +10,7 @@
       "action": "click",
       "selector": {
         "strategy": "testid",
-        "value": "product-01KKNWM4EP4HYEP1X6CF8622XB"
+        "value": "product-01KKP3FV0NY59TQMVFHG2S7GH4"
       }
     },
     {
@@ -34,6 +34,14 @@
       "url": "https://practicesoftwaretesting.com/checkout"
     },
     {
+      "action": "fill",
+      "selector": {
+        "strategy": "testid",
+        "value": "product-quantity"
+      },
+      "value": "1"
+    },
+    {
       "action": "click",
       "selector": {
         "strategy": "testid",
@@ -49,8 +57,8 @@
   ],
   "_meta": {
     "source": "prd_generator",
-    "planned_at": "2026-03-14T10:33:43.462781+00:00",
-    "locators": 260,
+    "planned_at": "2026-03-14T17:47:08.962290+00:00",
+    "locators": 2427,
     "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
   }
 }

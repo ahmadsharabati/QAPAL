@@ -1,0 +1,32 @@
+{
+  "test_id": "bookshop-TC002_filter_category",
+  "name": "User can filter by category",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://books.toscrape.com/"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "role",
+        "value": {
+          "role": "link",
+          "name": "Mystery"
+        }
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "type": "url_contains",
+      "value": "/catalogue/category/books/mystery_3/index.html"
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-14T17:41:21.712317+00:00",
+    "locators": 2430,
+    "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
+  }
+}

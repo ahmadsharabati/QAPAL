@@ -156,6 +156,8 @@ class Replanner:
 
         if not isinstance(steps, list):
             raise ReplanningError("Replanner must return a JSON array of steps.")
+        if not steps:
+            raise ReplanningError("Replanner returned an empty plan.")
 
         # Tag all patched steps so they're identifiable in reports
         for step in steps:

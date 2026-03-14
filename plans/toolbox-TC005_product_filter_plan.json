@@ -1,6 +1,6 @@
 {
-  "test_id": "TC003_product_filter",
-  "name": "User can filter products by category",
+  "test_id": "toolbox-TC005_product_filter",
+  "name": "User can filter products",
   "steps": [
     {
       "action": "navigate",
@@ -9,16 +9,15 @@
     {
       "action": "click",
       "selector": {
-        "strategy": "testid_prefix",
-        "value": "category-",
-        "index": 0
+        "strategy": "testid",
+        "value": "sort"
       }
     }
   ],
   "assertions": [
     {
       "type": "element_visible",
-      "selector": {
+      "value": {
         "strategy": "testid_prefix",
         "value": "product-",
         "index": 0
@@ -27,8 +26,8 @@
   ],
   "_meta": {
     "source": "prd_generator",
-    "planned_at": "2026-03-14T10:24:43.352940+00:00",
-    "locators": 260,
+    "planned_at": "2026-03-14T17:47:08.962298+00:00",
+    "locators": 2427,
     "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
   }
 }

@@ -1,6 +1,6 @@
 {
-  "test_id": "TC001_login",
-  "name": "User can log in successfully",
+  "test_id": "toolbox-TC005_logout",
+  "name": "User can logout",
   "steps": [
     {
       "action": "navigate",
@@ -28,18 +28,24 @@
         "strategy": "testid",
         "value": "login-submit"
       }
+    },
+    {
+      "action": "navigate",
+      "url": "https://practicesoftwaretesting.com/auth/logout"
     }
   ],
   "assertions": [
     {
-      "type": "url_equals",
-      "value": "https://practicesoftwaretesting.com/account"
+      "type": "url_contains",
+      "value": "https://practicesoftwaretesting.com",
+      "_auto_fixed": true,
+      "_original_value": "https://practicesoftwaretesting.com"
     }
   ],
   "_meta": {
     "source": "prd_generator",
-    "planned_at": "2026-03-14T10:33:43.451823+00:00",
-    "locators": 260,
+    "planned_at": "2026-03-14T17:43:23.061316+00:00",
+    "locators": 2427,
     "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
   }
 }

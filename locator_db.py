@@ -24,6 +24,7 @@ import hashlib
 import os
 import re
 import threading
+import copy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse, urlunparse
@@ -69,6 +70,34 @@ def _normalize_url(url: str) -> str:
         return ""
     p = urlparse(url)
     return urlunparse((p.scheme, p.netloc, p.path, "", "", ""))
+
+
+# Matches dynamic path segments: ULID (26 base32), UUID, or 4+ digit numbers.
+# Used by _url_to_pattern to replace volatile segments with :id placeholder.
+_DYNAMIC_PATH_SEG_RE = re.compile(
+    r"(?<=/)"
+    r"(?:[0-9A-Za-z]{26}"                                          # ULID (26-char base32)
+    r"|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"  # UUID
+    r"|\d{4,}"                                                     # numeric IDs ≥4 digits
+    r")(?=/|$)"
+)
+
+
+def _url_to_pattern(url: str) -> str:
+    """
+    Replace volatile path segments (ULID, UUID, numeric ID) with ':id'.
+    e.g. '/product/01KKNWM4EP4HYEP1X6CF8622XB' → '/product/:id'
+    Used by StateGraph to group stale/rotating product URLs under a stable pattern.
+    """
+    if not url:
+        return url
+    p = _normalize_url(url)
+    path = urlparse(p).path
+    normalized_path = _DYNAMIC_PATH_SEG_RE.sub(":id", path)
+    if normalized_path == path:
+        return p
+    parsed = urlparse(p)
+    return urlunparse((parsed.scheme, parsed.netloc, normalized_path, "", "", ""))
 
 
 # ── Dynamic name normalization ────────────────────────────────────────
@@ -124,10 +153,10 @@ def _make_id(
 
 # ── Frame helper ──────────────────────────────────────────────────────
 
-def _make_frame(element: dict) -> dict:
+def _make_frame(element: dict, page_url: str = "main") -> dict:
     frame_id = element.get("frameId", "main")
     if frame_id == "main":
-        return {"type": "main", "url": "main", "name": "", "cross_origin": False, "accessible": True}
+        return {"type": "main", "url": page_url, "name": "", "cross_origin": False, "accessible": True}
     return {
         "type":         "iframe",
         "url":          frame_id,
@@ -259,7 +288,7 @@ class LocatorDB:
         container  = element.get("container", "")
         dom_path   = element.get("domPath", "")
         actionable = element.get("actionable", True)
-        frame      = _make_frame(element)
+        frame      = _make_frame(element, page_url)
         frame_url  = frame["url"]
         doc_id     = _make_id(page_url, role, name, container, frame_url, dom_path)
         chain      = _build_chain(element, container)
@@ -451,7 +480,7 @@ class LocatorDB:
             existing = self._locs.get(self._Q.id == doc_id)
             if not existing:
                 return
-            chain = existing["locators"]["chain"]
+            chain = copy.deepcopy(existing["locators"]["chain"])
             for entry in chain:
                 if entry["strategy"] in ("role", "role+container") and entry["unique"] is None:
                     entry["unique"] = unique

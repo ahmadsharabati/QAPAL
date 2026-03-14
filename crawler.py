@@ -86,11 +86,11 @@ A11Y_JS = r"""
         .map(function(id){ return (document.getElementById(id)||{}).textContent||''; })
         .join(' ').trim();
     }
-    if (el.labels && el.labels.length) return el.labels[0].textContent.trim().slice(0,80);
+    if (el.labels && el.labels.length) return el.labels[0].textContent.trim();
     v = el.getAttribute('placeholder'); if (v) return v.trim();
     v = el.getAttribute('title');       if (v) return v.trim();
     if (tag === 'button' || tag === 'a') {
-      v = el.textContent.trim(); if (v && v.length < 80) return v;
+      v = el.textContent.trim(); if (v) return v;
     }
     return '';
   }
@@ -270,7 +270,7 @@ DOM_FALLBACK_JS = r"""
 
     var name = el.getAttribute('aria-label')
       || testid
-      || el.textContent.trim().slice(0, 80)
+      || el.textContent.trim()
       || '';
 
     var selector = testid

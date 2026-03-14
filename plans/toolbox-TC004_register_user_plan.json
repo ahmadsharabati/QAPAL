@@ -1,6 +1,6 @@
 {
-  "test_id": "TC005_register",
-  "name": "User can register successfully",
+  "test_id": "toolbox-TC004_register_user",
+  "name": "User can register",
   "steps": [
     {
       "action": "navigate",
@@ -28,7 +28,7 @@
         "strategy": "testid",
         "value": "email"
       },
-      "value": "john.doe@example.com"
+      "value": "johndoe@example.com"
     },
     {
       "action": "fill",
@@ -51,13 +51,13 @@
       "type": "url_contains",
       "value": "/auth/register",
       "_auto_fixed": true,
-      "_original_value": "/account"
+      "_original_value": "https://practicesoftwaretesting.com/account"
     }
   ],
   "_meta": {
     "source": "prd_generator",
-    "planned_at": "2026-03-13T14:02:41.687437+00:00",
-    "locators": 214,
+    "planned_at": "2026-03-14T17:47:08.962294+00:00",
+    "locators": 2427,
     "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
   }
 }

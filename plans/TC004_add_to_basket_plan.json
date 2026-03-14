@@ -1,10 +1,10 @@
 {
-  "test_id": "TC002_add_to_cart",
-  "name": "User can add product to cart",
+  "test_id": "TC004_add_to_basket",
+  "name": "User can add to basket",
   "steps": [
     {
       "action": "navigate",
-      "url": "https://practicesoftwaretesting.com/category/hand-tools"
+      "url": "https://books.toscrape.com"
     },
     {
       "action": "click",
@@ -17,23 +17,24 @@
     {
       "action": "click",
       "selector": {
-        "strategy": "testid",
-        "value": "add-to-cart"
+        "strategy": "role",
+        "value": {
+          "role": "button",
+          "name": "Add to basket"
+        }
       }
     }
   ],
   "assertions": [
     {
-      "type": "url_contains",
-      "value": "/product/",
-      "_auto_fixed": true,
-      "_original_value": "/checkout"
+      "type": "url_equals",
+      "value": "https://books.toscrape.com"
     }
   ],
   "_meta": {
     "source": "prd_generator",
-    "planned_at": "2026-03-14T10:33:43.454348+00:00",
-    "locators": 260,
+    "planned_at": "2026-03-14T11:10:11.717537+00:00",
+    "locators": 350,
     "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
   }
 }

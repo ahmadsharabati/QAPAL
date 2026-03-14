@@ -46,13 +46,17 @@ async def extract_semantic_context(page, url: str) -> dict:
     except Exception:
         return _empty_context(url)
 
+    a11y_result = _extract_from_a11y(a11y, url, title)
+
     # Try Crawl4AI first — richer link/table extraction
     result = await _extract_with_crawl4ai(html, url, title)
     if result:
+        result["buttons"] = a11y_result.get("buttons", [])
+        result["forms"]   = a11y_result.get("forms", [])
         return result
 
     # Fallback: parse Playwright accessibility snapshot directly
-    return _extract_from_a11y(a11y, url, title)
+    return a11y_result
 
 
 def compute_dom_hash(html: str) -> str:

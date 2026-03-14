@@ -26,7 +26,7 @@ import re
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from locator_db import LocatorDB, _normalize_url, DYNAMIC_ID_RE as _LIST_ITEM_ID_RE
+from locator_db import LocatorDB, _normalize_url, DYNAMIC_ID_RE as _DYNAMIC_ID_RE
 from ai_client import AIClient
 
 try:
@@ -154,7 +154,7 @@ def _prune_list_items(locators: List[dict]) -> List[dict]:
             non_list.append(loc)
             continue
         primary_val = str(chain[0].get("value", ""))
-        m = _LIST_ITEM_ID_RE.search(primary_val)
+        m = _DYNAMIC_ID_RE.search(primary_val)
         if m:
             prefix = primary_val[: m.start() + 1]  # e.g. "product-"
             prefix_groups[prefix].append(loc)
@@ -385,12 +385,25 @@ def _parse_plan(text: str, test_id: str, locator_map: dict) -> dict:
     plan.setdefault("steps", [])
     plan.setdefault("assertions", [])
 
-    # Validate element_ids — flag invented ones (skip navigate steps, they have no element)
+    # Validate element_ids — flag invented ones
     for item in plan["steps"] + plan["assertions"]:
-        if item.get("action") == "navigate":
-            continue
+        action = item.get("action")
+        atype = item.get("type")
+        
+        needs_target = False
+        if action and action not in ("navigate", "refresh", "go_back", "go_forward", "wait", "screenshot", "evaluate"):
+            needs_target = True
+        elif atype and atype not in ("url_equals", "url_contains", "url_matches", "title_equals", "title_contains", "javascript"):
+            needs_target = True
+        elif "selector" in item:
+            needs_target = True
+
         eid = item.get("element_id")
-        if eid and eid not in locator_map:
+        
+        if needs_target and not eid:
+            item["_invalid_element_id"] = True
+            item["_needs_review"]       = True
+        elif eid and eid not in locator_map:
             item["_invalid_element_id"] = True
             item["_needs_review"]       = True
 
@@ -490,6 +503,7 @@ class Planner:
         max_retries = 3
         plan = None
         attempt = 0
+        base_prompt = prompt
 
         for attempt in range(max_retries):
             try:
@@ -506,7 +520,7 @@ class Planner:
 
                 bad_ids = [item.get("element_id") for item in invalid_items]
                 print(f"  ⚠ [attempt {attempt + 1}] hallucinated element_ids: {bad_ids} — retrying")
-                prompt += (
+                prompt = base_prompt + (
                     f"\n\nCRITICAL ERROR: In your previous response you invented these element_ids: {bad_ids}.\n"
                     f"element_ids MUST be copied verbatim from the bracketed IDs in Available Locators (e.g. [a3f92b...]).\n"
                     f"NEVER invent sequential IDs like elem1, elem2, etc.\n"

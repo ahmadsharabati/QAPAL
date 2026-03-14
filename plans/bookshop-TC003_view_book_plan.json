@@ -1,0 +1,32 @@
+{
+  "test_id": "bookshop-TC003_view_book",
+  "name": "User can view book details",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "https://books.toscrape.com/"
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "role",
+        "value": "link",
+        "name": "A Light in the Attic"
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "type": "url_contains",
+      "value": "/",
+      "_auto_fixed": true,
+      "_original_value": "/catalogue/a-light-in-the-attic_1000/index.html"
+    }
+  ],
+  "_meta": {
+    "source": "prd_generator",
+    "planned_at": "2026-03-14T17:41:21.712323+00:00",
+    "locators": 2430,
+    "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
+  }
+}

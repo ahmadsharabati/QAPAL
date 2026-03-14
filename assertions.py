@@ -1155,7 +1155,7 @@ def validate_selector(selector: dict, field_name: str = "selector") -> List[str]
         return errors
     
     valid_strategies = ["role", "testid", "css", "xpath", "text", "label",
-                        "placeholder", "alt_text", "title", "aria-label"]
+                        "placeholder", "alt_text", "title", "aria-label", "testid_prefix", "id"]
     if strategy not in valid_strategies:
         errors.append(f"'{field_name}' has invalid strategy: '{strategy}'")
     
@@ -1195,7 +1195,7 @@ def assertion_to_schema() -> dict:
                 "strategy": {
                     "type": "string",
                     "enum": ["role", "testid", "css", "xpath", "text", "label",
-                            "placeholder", "alt_text", "title", "aria-label"],
+                            "placeholder", "alt_text", "title", "aria-label", "testid_prefix", "id"],
                 },
                 "value": {
                     "oneOf": [

@@ -136,7 +136,7 @@ def _resolve_frame(page: Page, frame_key: Optional[str]):
     if not frame_key or frame_key == "main":
         return page
     for frame in page.frames:
-        if frame.name == frame_key or (frame.url and frame_key in frame.url):
+        if frame.name == frame_key or (frame.url and frame_key == _normalize_url(frame.url)):
             return frame
     return page
 
@@ -161,7 +161,7 @@ def _build_locator(ctx, selector: dict) -> Optional[Locator]:
             role_name = selector.get("name") or selector.get("label")
         else:
             role_name = None
-        value = {"role": strategy, "name": role_name} if role_name else {"role": strategy}
+        value = {"role": strategy, "name": role_name} if role_name is not None else {"role": strategy}
         strategy = "role"
     if value is None:
         return None
@@ -200,7 +200,7 @@ def _build_locator(ctx, selector: dict) -> Optional[Locator]:
                 name = value.get("name")
                 if isinstance(name, str) and name.startswith("^"):
                     name = re.compile(name)
-                return ctx.get_by_role(value["role"], name=name) if name else ctx.get_by_role(value["role"])
+                return ctx.get_by_role(value["role"], name=name) if name is not None else ctx.get_by_role(value["role"])
             return ctx.get_by_role(str(value))
         if strategy == "label":
             return ctx.get_by_label(str(value))
@@ -213,7 +213,7 @@ def _build_locator(ctx, selector: dict) -> Optional[Locator]:
         if strategy == "aria-label":
             return ctx.locator(f'[aria-label="{value}"]')
         if strategy in ("css", "id", "xpath"):
-            prefix = "xpath=" if strategy == "xpath" else ""
+            prefix = "xpath=" if strategy == "xpath" else ("#" if strategy == "id" else "")
             return ctx.locator(f"{prefix}{value}")
     except Exception:
         pass
@@ -700,10 +700,10 @@ async def _execute_step(
                     pass
                 if not label_selected:
                     # Word-based partial label match (handles punctuation differences)
-                    matched = await page.evaluate(
-                        """([sel, txt]) => {
-                            const el = document.querySelector(sel);
-                            if (!el) return null;
+                    # Uses loc.evaluate so the element is already resolved — no CSS selector needed
+                    matched = await loc.evaluate(
+                        """(el, txt) => {
+                            if (!el || !el.options) return null;
                             const words = txt.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 2);
                             let best = null, bestScore = 0;
                             for (const opt of el.options) {
@@ -718,7 +718,7 @@ async def _execute_step(
                             }
                             return null;
                         }""",
-                        [f'[data-test="{selector.get("value", "")}"], select', raw_label],
+                        raw_label,
                     )
                     if not matched:
                         await loc.select_option(label=raw_label, timeout=timeout)  # raise real error
@@ -734,10 +734,10 @@ async def _execute_step(
                             await loc.select_option(label=raw_val, timeout=3000)
                         else:
                             # Partial label: find the first option whose text contains raw_val
-                            matched = await page.evaluate(
-                                """([sel, txt]) => {
-                                    const el = document.querySelector(sel);
-                                    if (!el) return null;
+                            # Uses loc.evaluate so the element is already resolved — no CSS selector needed
+                            matched = await loc.evaluate(
+                                """(el, txt) => {
+                                    if (!el || !el.options) return null;
                                     for (const opt of el.options) {
                                         if (opt.text.toLowerCase().includes(txt.toLowerCase())) {
                                             el.value = opt.value;
@@ -747,7 +747,7 @@ async def _execute_step(
                                     }
                                     return null;
                                 }""",
-                                [f'[data-test="{selector.get("value", "")}"], select', raw_val],
+                                raw_val,
                             )
                             if not matched:
                                 break
@@ -1158,6 +1158,32 @@ class Executor:
         tc_id   = test_case.get("id", "unknown")
         tc_name = test_case.get("name", tc_id)
         start   = time.monotonic()
+        
+        from assertions import validate_assertion
+        for a in test_case.get("assertions", []):
+            is_valid, errors = validate_assertion(a)
+            if not is_valid:
+                return {
+                    "id":          tc_id,
+                    "name":        tc_name,
+                    "status":      "fail",
+                    "steps":       [],
+                    "assertions":  [{"type": a.get("type", "unknown"), "status": "fail", "reason": f"Invalid assertion: {'; '.join(errors)}"}],
+                    "duration_ms": int((time.monotonic() - start) * 1000),
+                    "screenshot":  None,
+                }
+                
+        for step in test_case.get("steps", []):
+            if step.get("_invalid_element_id"):
+                return {
+                    "id":          tc_id,
+                    "name":        tc_name,
+                    "status":      "fail",
+                    "steps":       [{"action": step.get("action", "unknown"), "status": "fail", "reason": "Invalid or hallucinated element_id before execution"}],
+                    "assertions":  [],
+                    "duration_ms": int((time.monotonic() - start) * 1000),
+                    "screenshot":  None,
+                }
 
         ctx  = await _build_context(
             self._browser,

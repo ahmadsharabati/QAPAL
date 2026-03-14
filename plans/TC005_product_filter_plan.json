@@ -7,30 +7,26 @@
       "url": "https://practicesoftwaretesting.com/category/hand-tools"
     },
     {
-      "action": "select",
+      "action": "click",
       "selector": {
         "strategy": "testid",
-        "value": "sort"
-      },
-      "label": "Price: Low to High"
+        "value": "category-01KKKMH1R4AC3K5VHZZEFH0XTZ"
+      }
     }
   ],
   "assertions": [
     {
       "type": "element_visible",
       "selector": {
-        "strategy": "role",
-        "value": {
-          "role": "textbox",
-          "name": "Search"
-        }
+        "strategy": "testid",
+        "value": "product-01KKKMH1R4AC3K5VHZZEFH0XTZ"
       }
     }
   ],
   "_meta": {
     "source": "prd_generator",
-    "planned_at": "2026-03-11T20:30:27.150216+00:00",
-    "locators": 347,
+    "planned_at": "2026-03-13T13:54:05.512243+00:00",
+    "locators": 214,
     "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
   }
 }
