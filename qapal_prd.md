@@ -31,6 +31,11 @@ QAPAL is a professional-grade UI automation framework that leverages AI to achie
 - **Precision Generation**: Granular control via `--num-tests N` to generate the exact coverage needed.
 - **Comprehensive Reporting**: Structured JSON reports with timing, step-by-step outcomes, and failure diagnostics.
 
+### 3.5 Semantic Abstraction & Action Mining (New)
+- **UI Action Mining Engine**: Automatically discovers reusable user-level actions (e.g., `login(email, password)`, `search(query)`) by analyzing form structures, input labels, and button roles.
+- **Compiled Site Model**: Transforms raw website structure into a compact, semantic application model. Allows the AI to reason about states and transitions without requiring raw DOM snapshots.
+- **90%+ Token Efficiency**: Reduces the input payload to the LLM by abstracting raw locators into high-level action definitions.
+
 ## 4. Technical Architecture
 
 - **Language**: Python 3.10+

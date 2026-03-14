@@ -1,6 +1,6 @@
 {
   "test_id": "bookshop-TC004_add_to_basket",
-  "name": "User can add book to basket",
+  "name": "User adds product to basket",
   "steps": [
     {
       "action": "navigate",
@@ -25,16 +25,16 @@
       "_original_value": {
         "strategy": "role",
         "value": {
-          "role": "button",
-          "name": "Checkout"
+          "role": "link",
+          "name": "Cart"
         }
       }
     }
   ],
   "_meta": {
     "source": "prd_generator",
-    "planned_at": "2026-03-14T17:41:21.712326+00:00",
-    "locators": 2430,
+    "planned_at": "2026-03-14T19:19:38.815571+00:00",
+    "locators": 2526,
     "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
   }
 }

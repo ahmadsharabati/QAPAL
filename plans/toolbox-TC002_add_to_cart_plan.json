@@ -10,7 +10,7 @@
       "action": "click",
       "selector": {
         "strategy": "testid",
-        "value": "product-01KKP3FV0NY59TQMVFHG2S7GH4"
+        "value": "product-01KKQ98FP9PT1GK1YDJMX4668H"
       }
     },
     {
@@ -34,8 +34,8 @@
   ],
   "_meta": {
     "source": "prd_generator",
-    "planned_at": "2026-03-14T17:47:08.962284+00:00",
-    "locators": 2427,
+    "planned_at": "2026-03-14T23:28:54.480982+00:00",
+    "locators": 2597,
     "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
   }
 }
