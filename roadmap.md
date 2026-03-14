@@ -37,12 +37,13 @@ Current state: **5/5 on practicesoftwaretesting.com, 5/5 on books.toscrape.com, 
 | 2 | 🔴 P0 | `crawler.py` + `locator_db.py` | Unnamed buttons missing from DB (no accessible name, no testid → never stored) |
 | 3 | 🟡 P1 | `locator_db.py` + `state_graph.py` + `crawler.py` | DOM Template Fingerprinting — skip re-crawling structurally identical pages |
 | 4 | 🟡 P1 | `executor.py` | Small model for AI rediscovery path (`QAPAL_AI_REDISCOVERY`) |
-| 5 | 🟢 P2 | `crawler.py` | Wire `classify_page_change()` into graph-crawl to tag edges with `page_change_type` |
-| 6 | 🟢 P3 | `crawler.py` | No-revisit enforcement — use `has_state()` in BFS instead of in-memory set |
-| 7 | 🔵 P4 | `crawler.py` + `state_graph.py` | Screenshot per page node during crawl → `reports/states/<state_id>.png` |
-| 8 | ⬜ P5 | `main.py` + `executor.py` | Structured JSON run report |
-| 9 | ⬜ P5 | `executor.py` | Concurrent test execution (`--parallel N`) |
-| 10 | ⬜ P5 | `executor.py` | Visual regression baseline + diff |
+| 5 | 🟢 P2 | `action_miner.py` + `site_compiler.py` + `generator.py` + `main.py` | **Compiled Site Model & UI Action Mining Engine** — 90% token reduction, reusable actions |
+| 6 | 🟢 P3 | `crawler.py` + `main.py` | Wire `classify_page_change()` into graph-crawl to tag edges with `page_change_type` |
+| 7 | 🟢 P3 | `crawler.py` | No-revisit enforcement — use `has_state()` in BFS instead of in-memory set |
+| 8 | 🔵 P4 | `crawler.py` + `state_graph.py` | Screenshot per page node during crawl → `reports/states/<state_id>.png` |
+| 9 | ⬜ P5 | `main.py` + `executor.py` | Structured JSON run report |
+| 10 | ⬜ P5 | `executor.py` | Concurrent test execution (`--parallel N`) |
+| 11 | ⬜ P5 | `executor.py` | Visual regression baseline + diff |
 
 ---
 
@@ -227,7 +228,270 @@ The AI rediscovery path (`QAPAL_AI_REDISCOVERY`) currently uses the same large m
 
 ---
 
-## 🟢 P2 — Wire `classify_page_change()` into graph-crawl
+## 🟢 P2 — Compiled Site Model & UI Action Mining Engine
+
+### Problem
+
+The AI generator currently receives a raw dump of up to 2600+ locators per `prd-run`. This:
+- Costs 6,000–10,000 tokens per plan generation call
+- Forces the AI to reason about DOM structure instead of user workflows
+- Produces fragile selectors because the AI picks from noise, not meaning
+- Provides no reuse — login steps are re-generated from scratch for every site
+
+### Solution
+
+Two new modules transform the raw locator DB + state graph into a compact **compiled application model** that the AI reasons about at the workflow level, not the DOM level.
+
+```
+Crawler → locator_db + state_graph
+                    ↓
+            action_miner.py        ← discovers reusable UI actions
+                    ↓
+            site_compiler.py       ← compiles states + actions into model
+                    ↓
+           compiled_model.json     ← compact site representation (~400 tokens)
+                    ↓
+            generator.py           ← uses compiled model instead of raw locators
+```
+
+**Token reduction:** ~2600 locators × ~3 tokens = ~7,800 tokens → ~400 tokens for compiled model. **~95% reduction.**
+
+---
+
+### Dependency
+
+Soft dependency on **P1 DOM Template Fingerprinting** — fingerprinting produces clean `url_pattern` groupings that the compiler uses to deduplicate states. Can be implemented without it but will produce noisier state groupings.
+
+---
+
+### Module 1: `action_miner.py`
+
+Discovers reusable semantic actions by clustering locators on each page into workflow units.
+
+#### Detection Heuristics
+
+| Pattern | Detected Action |
+|---------|----------------|
+| `textbox[email]` + `textbox[password]` + `button[login/sign in]` | `login(email, password)` |
+| `textbox[search/keyword]` + `button[search/submit]` | `search(query)` |
+| `textbox[first-name]` + `textbox[last-name]` + `textbox[email]` + `textbox[password]` + submit | `create_account(user)` |
+| `button[add to cart/add to basket]` on a product URL | `add_to_cart()` |
+| `button[checkout/place order/proceed]` | `proceed_to_checkout()` |
+| Nav links in state graph transitions | `navigate_to_<page>()` |
+
+#### Action Schema
+
+```python
+# action_miner.py — output per discovered action
+{
+    "name": "login",
+    "description": "Log in with email and password",
+    "entry_url_pattern": "/auth/login",
+    "post_url_pattern": "/account",          # from state graph transition (if known)
+    "parameters": ["email", "password"],
+    "steps": [
+        {"type": "fill",  "selector": {"strategy": "testid", "value": "email"},          "param": "email"},
+        {"type": "fill",  "selector": {"strategy": "testid", "value": "password"},       "param": "password"},
+        {"type": "click", "selector": {"strategy": "testid", "value": "login-submit"}}
+    ]
+}
+```
+
+#### Implementation
+
+```python
+# action_miner.py
+
+class ActionMiner:
+    def __init__(self, db: LocatorDB, state_graph: StateGraph):
+        self._db = db
+        self._sg = state_graph
+
+    def mine(self, base_url: str) -> list[dict]:
+        """Return list of discovered action dicts for base_url."""
+        actions = []
+        for url_pattern, locs in self._group_by_url_pattern(base_url):
+            actions += self._detect_form_actions(url_pattern, locs)
+            actions += self._detect_nav_actions(url_pattern, locs)
+        return self._deduplicate(actions)
+
+    def _detect_form_actions(self, url_pattern, locs) -> list[dict]: ...
+    def _detect_nav_actions(self, url_pattern, locs) -> list[dict]: ...
+    def _group_by_url_pattern(self, base_url) -> dict: ...
+    def _deduplicate(self, actions) -> list[dict]: ...
+```
+
+---
+
+### Module 2: `site_compiler.py`
+
+Compiles the mined actions + state graph into a compact `compiled_model.json`.
+
+#### Output Schema
+
+```json
+{
+  "version": "1.0",
+  "compiled_at": "2026-03-15T...",
+  "base_url": "https://practicesoftwaretesting.com",
+  "token_estimate": 380,
+  "states": {
+    "home":           {"url_pattern": "/",              "available_actions": ["navigate_to_products", "navigate_to_login"]},
+    "login":          {"url_pattern": "/auth/login",    "available_actions": ["login"]},
+    "products":       {"url_pattern": "/category/:id",  "available_actions": ["filter_by_category", "navigate_to_product"]},
+    "product_detail": {"url_pattern": "/product/:id",   "available_actions": ["add_to_cart"]},
+    "cart":           {"url_pattern": "/checkout",      "available_actions": ["proceed_to_checkout"]},
+    "account":        {"url_pattern": "/account",       "available_actions": ["navigate_to_logout"]}
+  },
+  "actions": {
+    "login": {
+      "description": "Log in with email and password",
+      "entry_state": "login",
+      "post_state": "account",
+      "parameters": ["email", "password"],
+      "steps": [
+        {"type": "fill",  "selector": {"strategy": "testid", "value": "email"},         "param": "email"},
+        {"type": "fill",  "selector": {"strategy": "testid", "value": "password"},      "param": "password"},
+        {"type": "click", "selector": {"strategy": "testid", "value": "login-submit"}}
+      ]
+    },
+    "search": {
+      "description": "Search for a product by keyword",
+      "entry_state": "products",
+      "post_state": "products",
+      "parameters": ["query"],
+      "steps": [
+        {"type": "fill",  "selector": {"strategy": "role", "value": {"role": "textbox", "name": "Search Product"}}, "param": "query"},
+        {"type": "click", "selector": {"strategy": "id",   "value": "submit_search"}}
+      ]
+    },
+    "add_to_cart": {
+      "description": "Add the current product to the cart",
+      "entry_state": "product_detail",
+      "post_state": "product_detail",
+      "parameters": [],
+      "steps": [
+        {"type": "click", "selector": {"strategy": "testid", "value": "add-to-cart"}}
+      ]
+    }
+  }
+}
+```
+
+#### Implementation
+
+```python
+# site_compiler.py
+
+class SiteCompiler:
+    def __init__(self, db: LocatorDB, state_graph: StateGraph):
+        self._miner = ActionMiner(db, state_graph)
+        self._sg = state_graph
+
+    def compile(self, base_url: str, output_path: str = "compiled_model.json") -> dict:
+        actions = self._miner.mine(base_url)
+        states  = self._build_state_map(base_url, actions)
+        model   = {
+            "version":        "1.0",
+            "compiled_at":    datetime.utcnow().isoformat(),
+            "base_url":       base_url,
+            "token_estimate": self._estimate_tokens(states, actions),
+            "states":         states,
+            "actions":        {a["name"]: a for a in actions},
+        }
+        with open(output_path, "w") as f:
+            json.dump(model, f, indent=2)
+        return model
+
+    def _build_state_map(self, base_url, actions) -> dict: ...
+    def _estimate_tokens(self, states, actions) -> int: ...
+```
+
+---
+
+### Module 3: Generator Integration (`generator.py`)
+
+When `compiled_model.json` exists and is fresh (< `CRAWLER_STALE_MINUTES` old), the generator uses it instead of the raw locator dump.
+
+**Prompt change (old):**
+```
+AVAILABLE LOCATORS (2,600 entries):
+[{"url": "...", "role": "button", "name": "Add to cart", ...}, ...]
+```
+
+**Prompt change (new):**
+```
+APPLICATION MODEL (compiled):
+States: home → login → account → ...
+Actions:
+  login(email, password)  — on /auth/login  → /account
+  search(query)           — on /products    → /products
+  add_to_cart()           — on /product/:id → stays
+  ...
+```
+
+The AI generates plans by composing actions instead of constructing selectors from scratch. Selectors are already embedded in the action definitions.
+
+```python
+# generator.py — new method
+def _load_compiled_model(self, base_url: str) -> dict | None:
+    path = os.getenv("QAPAL_COMPILED_MODEL", "compiled_model.json")
+    if not os.path.exists(path):
+        return None
+    model = json.load(open(path))
+    if model.get("base_url", "").rstrip("/") != base_url.rstrip("/"):
+        return None  # model is for a different site
+    return model
+
+# In generate(): prefer compiled model over raw locators
+compiled = self._load_compiled_model(base_url)
+if compiled:
+    locator_context = _format_compiled_model(compiled)   # ~400 tokens
+else:
+    locator_context = self._db.format_for_prompt(...)    # ~7,800 tokens
+```
+
+---
+
+### New CLI Command
+
+```bash
+# Compile site model (crawl must have run first)
+python main.py compile --url https://practicesoftwaretesting.com
+
+# Output
+#   compiled_model.json           ← committed alongside plans/
+#   console: "Compiled 6 states, 8 actions — 380 tokens (est.)"
+
+# prd-run auto-uses compiled model if present
+python main.py prd-run --prd toolbox.md --url https://practicesoftwaretesting.com
+#   → "Using compiled model: 6 states, 8 actions (380 tokens)"
+```
+
+---
+
+### Files
+
+| File | Type | Change |
+|------|------|--------|
+| `action_miner.py` | **new** | Discovers reusable UI actions from locator DB + state graph |
+| `site_compiler.py` | **new** | Compiles states + actions into `compiled_model.json` |
+| `generator.py` | modified | Use compiled model in prompt when available; fallback to locator dump |
+| `main.py` | modified | Add `compile` CLI command; auto-detect compiled model in `prd-run` |
+| `compiled_model.json` | **new artifact** | Committed alongside `plans/`; version-controlled per site |
+
+### Success Metrics
+
+| Metric | Current | Target |
+|--------|---------|--------|
+| Tokens per plan generation | ~7,800 | ~400 |
+| Plan generation time | ~8s | ~2s |
+| Selector hallucination rate | ~15% on plain-HTML sites | <2% |
+| Action reuse across test cases | 0% | 100% for login/search/cart |
+
+---
+
+## 🟢 P3 — Wire `classify_page_change()` into graph-crawl
 
 **File:** `crawler.py`, `main.py`
 
@@ -275,9 +539,12 @@ After a passing run, save a screenshot per assertion step as a baseline. On re-r
 
 | File | Changes |
 |------|---------|
-| `generator.py` | P0.3: role mismatch correction in `_fix_selector_strategies` |
+| `generator.py` | P0.3: role mismatch correction in `_fix_selector_strategies`; P2: compiled model prompt integration |
 | `crawler.py` | P0.4: capture unnamed buttons with semantic id; P1: template check in `crawl_page`; P3: `has_state` in BFS; P4: screenshot |
 | `locator_db.py` | P0.4: `id` strategy in locator chain; P1: `_compute_template_hash`, `_strip_nth`, `inherit_locators` |
 | `state_graph.py` | P1: `page_templates` table + 3 methods; P4: screenshot in `enrich_and_add` |
 | `executor.py` | P1: `model_override` in AI rediscovery; P5.2: `--parallel`; P5.3: visual baseline |
-| `main.py` | P2: `classify_page_change` in graph-crawl; P5.1: run report write |
+| `main.py` | P2: `compile` CLI command + auto-detect in `prd-run`; P3: `classify_page_change` in graph-crawl; P5.1: run report write |
+| `action_miner.py` | **new** — P2: UI Action Mining Engine |
+| `site_compiler.py` | **new** — P2: Site Compiler |
+| `compiled_model.json` | **new artifact** — P2: output of compile command |
