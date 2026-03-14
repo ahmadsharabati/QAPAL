@@ -180,19 +180,22 @@ def _build_chain(element: dict, container: str) -> List[Dict[str, Any]]:
     if testid:
         chain.append({"strategy": "testid", "value": testid, "unique": True})
 
-    if role and name:
+    if role and role != "none" and name:
         chain.append({
             "strategy": "role",
             "value":    {"role": role, "name": name},
             "unique":   None,
         })
 
-    if role and name and container:
+    if role and role != "none" and name and container:
         chain.append({
             "strategy": "role+container",
             "value":    {"role": role, "name": name, "container": container},
             "unique":   None,
         })
+
+    if (not role or role == "none") and name:
+        chain.append({"strategy": "text", "value": name, "unique": None})
 
     aria = element.get("ariaLabel")
     if aria:
@@ -311,7 +314,7 @@ class LocatorDB:
             warnings = self._warnings(page_url, role, name, container, chain, actionable, exclude_id=doc_id)
 
             if existing:
-                old_chain = existing["locators"]["chain"]
+                old_chain = existing.get("locators", {}).get("chain", [])
                 prev      = existing.get("previous_locators", [])
                 if old_chain != chain:
                     prev = (prev + [{"chain": old_chain, "retired": _now()}])[-5:]
@@ -332,9 +335,9 @@ class LocatorDB:
                             "actionable": actionable,
                         },
                         "history": {
-                            "first_seen": existing["history"]["first_seen"],
+                            "first_seen": existing.get("history", {}).get("first_seen", _now()),
                             "last_seen":  _now(),
-                            "hit_count":  existing["history"]["hit_count"] + 1,
+                            "hit_count":  existing.get("history", {}).get("hit_count", 0) + 1,
                             "miss_count": 0,
                             "valid":      True,
                         },

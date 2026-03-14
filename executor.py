@@ -520,7 +520,7 @@ async def _execute_step(
                 if wait_state in ("enabled", "disabled", "editable"):
                     # Playwright wait_for only supports visible/hidden/attached/detached
                     # Poll for these states instead
-                    wait_timeout = step.get("timeout", 30_000)
+                    wait_timeout = step.get("timeout", ACTION_TIMEOUT)
                     if wait_state == "enabled":
                         await wait_loc.first.wait_for(state="visible", timeout=wait_timeout)
                         if await wait_loc.first.is_disabled():
@@ -535,7 +535,7 @@ async def _execute_step(
                             return _step_fail(step, "Element is not editable"), page_url
                     return _step_pass(step, f"element is {wait_state}"), page_url
                 else:
-                    await wait_loc.first.wait_for(state=pw_state, timeout=step.get("timeout", 30_000))
+                    await wait_loc.first.wait_for(state=pw_state, timeout=step.get("timeout", ACTION_TIMEOUT))
                     return _step_pass(step, f"element reached state={wait_state}"), page_url
             except Exception as e:
                 return _step_fail(step, f"wait for element state={wait_state} failed: {e}"), page_url
@@ -543,7 +543,7 @@ async def _execute_step(
             try:
                 await page.wait_for_url(
                     f"**/*{step['for_url_contains']}*",
-                    timeout=step.get("timeout", 30_000),
+                    timeout=step.get("timeout", ACTION_TIMEOUT),
                 )
                 return _step_pass(step, f"url contains {step['for_url_contains']}"), _normalize_url(page.url)
             except Exception as e:
@@ -552,14 +552,14 @@ async def _execute_step(
             try:
                 await page.wait_for_url(
                     re.compile(step["for_url_matches"]),
-                    timeout=step.get("timeout", 30_000),
+                    timeout=step.get("timeout", ACTION_TIMEOUT),
                 )
                 return _step_pass(step, f"url matches {step['for_url_matches']}"), _normalize_url(page.url)
             except Exception as e:
                 return _step_fail(step, f"wait for_url_matches failed: {e}"), page_url
         if step.get("for_url"):
             try:
-                await page.wait_for_url(step["for_url"], timeout=step.get("timeout", 30_000))
+                await page.wait_for_url(step["for_url"], timeout=step.get("timeout", ACTION_TIMEOUT))
                 return _step_pass(step, f"url = {step['for_url']}"), _normalize_url(page.url)
             except Exception as e:
                 return _step_fail(step, f"wait for_url failed: {e}"), page_url
@@ -993,7 +993,9 @@ async def _run_assertion(
             checks   = {"equals": count == expected, "at_least": count >= expected,
                         "at_most": count <= expected, "greater_than": count > expected,
                         "less_than": count < expected}
-            ok = checks.get(operator, count == expected)
+            if operator not in checks:
+                return _assert_fail(a, f"Unknown operator: {operator}")
+            ok = checks[operator]
             return _assert_pass(a, count) if ok else \
                    _assert_fail(a, f"count={count}, expected {operator} {expected}", count)
 
@@ -1010,7 +1012,7 @@ async def _run_assertion(
             if loc is None:
                 return _assert_fail(a, "Element not found")
             classes = (await loc.first.get_attribute("class") or "").split()
-            cls     = a.get("class") or str(value) if value is not None else ""
+            cls     = str(value) if value is not None else ""
             return _assert_pass(a, classes) if cls in classes else \
                    _assert_fail(a, f"Class '{cls}' not in {classes}", classes)
 

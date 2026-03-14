@@ -403,12 +403,14 @@ class TestGenerator:
         transitions = self._state_graph.all_transitions()
         current_url = ""
         nav_graph_resolved = False  # True only when a click matched a nav graph transition
+        last_click_role = ""        # role of the last clicked element (button vs link)
 
         for step in steps:
             action = step.get("action", "")
             if action == "navigate":
                 current_url = step.get("url", current_url)
                 nav_graph_resolved = True  # navigate steps give us a known URL
+                last_click_role = ""
             elif action == "click" and current_url:
                 sel   = step.get("selector", {})
                 val   = sel.get("value", "")
@@ -416,12 +418,16 @@ class TestGenerator:
                 # Also handle AI outputting "name" at the selector top level.
                 if sel.get("strategy") in ("testid", "testid_prefix"):
                     click_label = str(val)
+                    last_click_role = ""  # testid: role unknown, treat as action (stay on page)
                 elif isinstance(val, dict):
                     click_label = str(val.get("name", "") or val.get("role", ""))
+                    last_click_role = str(val.get("role", "")).lower()
                 elif not val and sel.get("name"):
                     click_label = str(sel.get("name", ""))
+                    last_click_role = ""
                 else:
                     click_label = str(val)
+                    last_click_role = ""
                 # When click_label contains a dynamic ID (e.g. product-01KKF...), strip
                 # it to match nav graph entries that may have a different ULID.
                 click_prefix = self._strip_dynamic_id(click_label)
@@ -449,9 +455,15 @@ class TestGenerator:
                     current_url = best["to_url"]
                     nav_graph_resolved = True
                 else:
-                    # No nav graph transition found for this click — destination unknown.
-                    # Mark as unresolved so we don't override the AI's assertion below.
-                    nav_graph_resolved = False
+                    # No nav graph transition found for this click.
+                    # For link clicks with no nav graph transition: nav graph may be
+                    # incomplete for this destination — trust the AI's assertion.
+                    # For button clicks or unknown-role elements: element is an action
+                    # (doesn't navigate), so current_url is the correct assertion target.
+                    if last_click_role == "link":
+                        nav_graph_resolved = False  # trust AI for navigation links
+                    else:
+                        nav_graph_resolved = True   # current_url is the correct URL
 
         if not current_url:
             return plan
@@ -563,7 +575,7 @@ class TestGenerator:
 
             # Also accept if any known element's name starts with the asserted name
             # (handles slight wording differences like "Add to cart" vs "Add to Cart")
-            if any(r == role and n.startswith(name[:6]) for r, n in known_role_names if len(name) >= 6):
+            if any(r == role and n.startswith(name) for r, n in known_role_names if len(name) >= 8):
                 fixed.append(a)
                 continue
 
