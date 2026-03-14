@@ -1,7 +1,31 @@
 # QAPAL Roadmap
-## Pending Features: Priority P1 → P5
+## Pending Features: Priority P0 → P5
 
 Current state: **5/5 on practicesoftwaretesting.com, 5/5 on books.toscrape.com, 5/5 on automationexercise.com.**
+
+---
+
+## ✅ Completed
+
+| Area | Fix / Feature | Commit |
+|------|---------------|--------|
+| `generator.py` | `_fix_url_assertions`: nav-graph-based URL simulation + `nav_graph_resolved` flag (button vs link click disambiguation) | b97f425 |
+| `generator.py` | `_fix_selector_strategies`: replace `testid` selectors on sites with no testid attributes | b97f425 |
+| `generator.py` | `_fix_element_assertions`: validate role+name assertions against DB, replace hallucinations | b97f425 |
+| `generator.py` | `_fix_url_assertions`: guard against empty `url_contains` value (P0.1) | b97f425 |
+| `generator.py` | Prefix threshold raised 6→8 chars in `_fix_element_assertions` to prevent false positives (#4) | d88e8a0 |
+| `generator.py` | `_fix_url_assertions` button-click fix: button role with no nav graph match resolves to current URL | d88e8a0 |
+| `executor.py` | `element_count`: unknown operator now returns assertion fail instead of silent equality fallback (#9) | d88e8a0 |
+| `executor.py` | `element_has_class`: reads `value` key correctly (was always `None` via `a.get("class")`) (#11) | d88e8a0 |
+| `executor.py` | `wait` action: all timeout defaults use `ACTION_TIMEOUT` env var instead of hardcoded 30s (#8) | d88e8a0 |
+| `executor.py` | `count = 0` initialized before primary selector block (prevented UnboundLocalError) | earlier |
+| `executor.py` | Testid OR-locator covering `data-testid`, `data-test`, `data-cy`, `data-qa` | earlier |
+| `executor.py` | `scroll_into_view_if_needed()` before interaction actions | earlier |
+| `locator_db.py` | `upsert`: `.get()` fallbacks on `locators`/`history` keys — no crash on corrupt DB entries (#20) | d88e8a0 |
+| `locator_db.py` | `_build_chain`: skips `role=none` for role+name entries, adds `text` strategy instead (#13) | d88e8a0 |
+| `ai_client.py` | `model_override` param on `complete()` / `acomplete()` for small-model calls | earlier |
+| `state_graph.py` | `format_for_prompt()`: filters navigate-action noise, uses prefix URL matching, caps at 12 paths | earlier |
+| `main.py` | PRD slug prefix for plan filenames (`bookshop-TC001_*`, `toolbox-TC001_*`) — no overwriting | earlier |
 
 ---
 
@@ -9,16 +33,16 @@ Current state: **5/5 on practicesoftwaretesting.com, 5/5 on books.toscrape.com, 
 
 | # | Priority | Area | What |
 |---|----------|------|------|
-| 1 | 🔴 P0 | generator.py | Wrong ARIA role in selectors not corrected (AI generates `role=button` when DB has `role=link`) |
-| 2 | 🔴 P0 | crawler.py + locator_db.py | Unnamed buttons missing from DB (no accessible name, no testid → never stored) |
-| 3 | 🟡 P1 | locator_db + state_graph + crawler | DOM Template Fingerprinting — skip re-crawling structurally identical pages |
-| 4 | 🟡 P1 | executor.py | Small model for AI rediscovery path (`QAPAL_AI_REDISCOVERY`) |
-| 5 | 🟢 P2 | crawler.py | Wire `classify_page_change()` into graph-crawl to tag edges with `page_change_type` |
-| 6 | 🟢 P3 | crawler.py | No-revisit enforcement — use `has_state()` in BFS instead of in-memory set |
-| 7 | 🔵 P4 | crawler.py + state_graph.py | Screenshot per page node during crawl → `reports/states/<state_id>.png` |
-| 8 | ⬜ P5 | main.py + executor.py | Structured JSON run report |
-| 9 | ⬜ P5 | executor.py | Concurrent test execution (`--parallel N`) |
-| 10 | ⬜ P5 | executor.py | Visual regression baseline + diff |
+| 1 | 🔴 P0 | `generator.py` | Wrong ARIA role in selectors not corrected (`role=button` when DB has `role=link`) |
+| 2 | 🔴 P0 | `crawler.py` + `locator_db.py` | Unnamed buttons missing from DB (no accessible name, no testid → never stored) |
+| 3 | 🟡 P1 | `locator_db.py` + `state_graph.py` + `crawler.py` | DOM Template Fingerprinting — skip re-crawling structurally identical pages |
+| 4 | 🟡 P1 | `executor.py` | Small model for AI rediscovery path (`QAPAL_AI_REDISCOVERY`) |
+| 5 | 🟢 P2 | `crawler.py` | Wire `classify_page_change()` into graph-crawl to tag edges with `page_change_type` |
+| 6 | 🟢 P3 | `crawler.py` | No-revisit enforcement — use `has_state()` in BFS instead of in-memory set |
+| 7 | 🔵 P4 | `crawler.py` + `state_graph.py` | Screenshot per page node during crawl → `reports/states/<state_id>.png` |
+| 8 | ⬜ P5 | `main.py` + `executor.py` | Structured JSON run report |
+| 9 | ⬜ P5 | `executor.py` | Concurrent test execution (`--parallel N`) |
+| 10 | ⬜ P5 | `executor.py` | Visual regression baseline + diff |
 
 ---
 
@@ -84,8 +108,6 @@ The DB entry name falls back to the `id` value itself (e.g., `name="submit_searc
 
 ---
 
----
-
 ## 🟡 P1 — DOM Template Fingerprinting
 
 ### Problem
@@ -118,14 +140,10 @@ def _strip_nth(dom_path: str) -> str:
     return _NTH_RE.sub("", dom_path)
 
 def _compute_template_hash(elements: list[dict]) -> str:
-    """
-    Hash DOM structure (roles + positions), ignoring all names/content.
-    Two pages with the same interactive element layout → same hash.
-    """
     structural_keys = sorted(
         (
             elem.get("identity", {}).get("role", ""),
-            elem.get("identity", {}).get("container", "").split("[")[0].split("#")[0],  # strip id/attr
+            elem.get("identity", {}).get("container", "").split("[")[0].split("#")[0],
             _strip_nth(elem.get("identity", {}).get("dom_path", ""))
         )
         for elem in elements
@@ -139,49 +157,30 @@ def _compute_template_hash(elements: list[dict]) -> str:
 ```python
 # state_graph.py — new table alongside existing 'page_states'
 {
-    "template_id":   "abc123def456",     # 12-char structural hash
+    "template_id":   "abc123def456",
     "url_pattern":   "https://books.toscrape.com/catalogue/:id/index.html",
     "sample_url":    "https://books.toscrape.com/catalogue/a-light-in-the-attic_1000/index.html",
     "element_count": 15,
-    "page_type":     "product_detail",   # auto-classified (see below)
     "first_seen":    "2026-03-14T...",
-    "match_count":   0,                  # incremented each time a URL matches
+    "match_count":   0,
 }
 ```
-
-#### Auto Page Type Classification
-
-Classify templates automatically from their structural fingerprint:
-
-| Condition | `page_type` |
-|-----------|-------------|
-| Has email + password inputs | `login` |
-| Has 10+ article cards + pagination links | `listing` |
-| Has single product h1 + price + add-to-basket form | `product_detail` |
-| Has multi-step form (billing/shipping/payment) | `checkout` |
-| Has search input + results container | `search_results` |
-| Default | `generic` |
 
 #### Crawl Skip Logic
 
 **In `crawler.py` `crawl_page()`**, after element extraction, before storing to DB:
 
 ```python
-# 1. Compute template hash from extracted elements
 template_hash = _compute_template_hash(raw_elements)
-
-# 2. Check if this structure was seen before
 if state_graph:
     existing = state_graph.get_template(template_hash)
     if existing:
-        # Same DOM layout as a previously-crawled URL
         state_graph.record_template_match(template_hash, url)
         db.inherit_locators(source_url=existing["sample_url"], target_url=url)
         return {"elements": len(raw_elements), "new": 0, "template_match": True,
                 "template_id": template_hash, "inherited_from": existing["sample_url"]}
 
-# 3. New template — crawl normally, then register
-result = _store_elements(raw_elements, url, db)  # existing path
+result = _store_elements(raw_elements, url, db)
 if state_graph:
     state_graph.register_template(template_hash, url, raw_elements,
                                   url_pattern=_url_to_pattern(url))
@@ -190,29 +189,18 @@ if state_graph:
 #### New Methods on `StateGraph`
 
 ```python
-def get_template(self, template_id: str) -> dict | None:
-    """Return template record if this structural fingerprint is known."""
-
+def get_template(self, template_id: str) -> dict | None: ...
 def register_template(self, template_id: str, url: str,
-                      elements: list[dict], url_pattern: str = "") -> None:
-    """Store a new page template. Called when a new structure is first seen."""
-
-def record_template_match(self, template_id: str, url: str) -> None:
-    """Increment match_count on an existing template. Log that url shares it."""
+                      elements: list[dict], url_pattern: str = "") -> None: ...
+def record_template_match(self, template_id: str, url: str) -> None: ...
 ```
 
 #### `inherit_locators()` in `LocatorDB`
 
 ```python
 def inherit_locators(self, source_url: str, target_url: str) -> int:
-    """
-    Copy all locator records from source_url to target_url,
-    replacing the url field. Returns number of records copied.
-    Skips if target_url already has locators.
-    """
+    """Copy all locator records from source_url to target_url. Returns count."""
 ```
-
----
 
 ### Files Affected
 
@@ -225,9 +213,7 @@ def inherit_locators(self, source_url: str, target_url: str) -> int:
 ### Expected Impact
 
 - **books.toscrape.com**: 1000 product pages → crawl 1, inherit 999. Crawl time: minutes → seconds.
-- **practicesoftwaretesting.com**: All `/product/:id` pages share one template. Already handled by URL-pattern dedup, but template inheritance gives richer locator context.
 - **DB size**: Eliminates duplicate locator records for structurally identical pages.
-- **Generator quality**: Template `page_type` label tells AI what kind of page it's working with → better assertion selection.
 
 ---
 
@@ -235,7 +221,7 @@ def inherit_locators(self, source_url: str, target_url: str) -> int:
 
 **File:** `executor.py`
 
-The AI rediscovery path (`QAPAL_AI_REDISCOVERY`) currently uses the same large model as generation. It should use `model_override=self._ai.small_model` (already implemented in `ai_client.py`). The executor just needs to pass the `model_override` argument to the existing `ai_client.complete()` call in the element rediscovery code path.
+The AI rediscovery path (`QAPAL_AI_REDISCOVERY`) currently uses the same large model as generation. `model_override` is already implemented in `ai_client.py` — the executor just needs to pass `model_override=self._ai.small_model` to the existing `ai_client.complete()` call in the rediscovery code path.
 
 **Token cost reduction:** ~90% cheaper per recovery call.
 
@@ -245,7 +231,7 @@ The AI rediscovery path (`QAPAL_AI_REDISCOVERY`) currently uses the same large m
 
 **File:** `crawler.py`, `main.py`
 
-`classify_page_change()` is implemented in `state_graph.py` but nothing calls it. In `cmd_graph_crawl()` in `main.py`, after each link click (when simulating navigation), call `classify_page_change(before_snap, after_snap, before_url, after_url)` and store the result as `page_change_type` on the recorded edge.
+`classify_page_change()` is implemented in `state_graph.py` but nothing calls it. In `cmd_graph_crawl()` in `main.py`, after each link click, call `classify_page_change(before_snap, after_snap, before_url, after_url)` and store the result as `page_change_type` on the recorded edge.
 
 The generator's Rule 12 can then use `page_change_type` to select the right assertion type:
 - `navigation` → `url_contains`
@@ -258,18 +244,7 @@ The generator's Rule 12 can then use `page_change_type` to select the right asse
 
 **File:** `crawler.py`
 
-`spider_crawl()` uses an in-memory `visited` set that resets every run. Replace it with `state_graph.has_state(state_id)` so already-known semantic states are skipped across runs. Add `--force` flag to bypass.
-
-```python
-# Before: resets each run
-if url in visited:
-    continue
-
-# After: persists across runs
-state_id = compute_semantic_hash(a11y_snapshot)
-if not force and state_graph.has_state(state_id):
-    continue
-```
+`spider_crawl()` uses an in-memory `visited` set that resets every run. Replace with `state_graph.has_state(state_id)` so already-known semantic states are skipped across runs. Add `--force` flag to bypass.
 
 ---
 
@@ -277,7 +252,7 @@ if not force and state_graph.has_state(state_id):
 
 **Files:** `crawler.py`, `state_graph.py`
 
-During crawl, after `crawl_page()`, save `page.screenshot(path=f"reports/states/{state_id}.png")` and pass `screenshot_path` to `enrich_and_add()`. Makes the state graph visually inspectable — you can see what each node looks like.
+During crawl, after `crawl_page()`, save `page.screenshot(path=f"reports/states/{state_id}.png")` and pass `screenshot_path` to `enrich_and_add()`. Makes the state graph visually inspectable.
 
 ---
 
@@ -289,14 +264,14 @@ After each `run` / `prd-run`, write `reports/run_<timestamp>.json`:
 - Summary: total/pass/fail counts, run duration
 
 ### P5.2 — Concurrent Test Execution
-Add `--parallel N` flag. Use `asyncio.gather()` to run N plans simultaneously, each in its own browser context. Sequential is default; parallel is opt-in.
+Add `--parallel N` flag. Use `asyncio.gather()` to run N plans simultaneously, each in its own browser context.
 
 ### P5.3 — Visual Regression Baseline
-After a passing run, save a screenshot per assertion step as a baseline. On re-run, compare with pixel diff threshold. Visual regressions are flagged in the report but do not block a functional pass.
+After a passing run, save a screenshot per assertion step as a baseline. On re-run, compare with pixel diff threshold. Visual regressions flagged in report but do not block a functional pass.
 
 ---
 
-## Files Affected
+## Files Affected (Pending Work)
 
 | File | Changes |
 |------|---------|
