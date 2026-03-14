@@ -503,6 +503,42 @@ async def _execute_step(
         if duration:
             await page.wait_for_timeout(int(duration))
             return _step_pass(step, f"waited {duration}ms"), page_url
+        # Wait for element state (e.g. visible, hidden, attached, detached)
+        wait_selector = step.get("selector")
+        wait_state = step.get("state")
+        if wait_selector and wait_state:
+            wait_loc, _ = await resolve_locator(
+                page, wait_selector, step.get("fallback"), db, page_url, ai_client, frame
+            )
+            if wait_loc is None and wait_state in ("hidden", "detached"):
+                return _step_pass(step, f"element already {wait_state} (not found)"), page_url
+            if wait_loc is None:
+                return _step_fail(step, f"Element not found for wait state={wait_state}"), page_url
+            try:
+                # Map "enabled"/"disabled"/"editable" to Playwright-supported states
+                pw_state = wait_state
+                if wait_state in ("enabled", "disabled", "editable"):
+                    # Playwright wait_for only supports visible/hidden/attached/detached
+                    # Poll for these states instead
+                    wait_timeout = step.get("timeout", 30_000)
+                    if wait_state == "enabled":
+                        await wait_loc.first.wait_for(state="visible", timeout=wait_timeout)
+                        if await wait_loc.first.is_disabled():
+                            return _step_fail(step, "Element is disabled"), page_url
+                    elif wait_state == "disabled":
+                        await wait_loc.first.wait_for(state="attached", timeout=wait_timeout)
+                        if not await wait_loc.first.is_disabled():
+                            return _step_fail(step, "Element is enabled"), page_url
+                    elif wait_state == "editable":
+                        await wait_loc.first.wait_for(state="visible", timeout=wait_timeout)
+                        if not await wait_loc.first.is_editable():
+                            return _step_fail(step, "Element is not editable"), page_url
+                    return _step_pass(step, f"element is {wait_state}"), page_url
+                else:
+                    await wait_loc.first.wait_for(state=pw_state, timeout=step.get("timeout", 30_000))
+                    return _step_pass(step, f"element reached state={wait_state}"), page_url
+            except Exception as e:
+                return _step_fail(step, f"wait for element state={wait_state} failed: {e}"), page_url
         if step.get("for_url_contains"):
             try:
                 await page.wait_for_url(
@@ -527,7 +563,7 @@ async def _execute_step(
                 return _step_pass(step, f"url = {step['for_url']}"), _normalize_url(page.url)
             except Exception as e:
                 return _step_fail(step, f"wait for_url failed: {e}"), page_url
-        return _step_fail(step, "wait requires duration, for_url, for_url_contains, or for_url_matches"), page_url
+        return _step_fail(step, "wait requires duration, selector+state, for_url, for_url_contains, or for_url_matches"), page_url
 
     if action == "screenshot":
         label     = step.get("label") or step.get("value") or "screenshot"
@@ -1155,7 +1191,7 @@ class Executor:
                 "screenshot":  "path/on/failure.png"
             }
         """
-        tc_id   = test_case.get("id", "unknown")
+        tc_id   = test_case.get("id") or test_case.get("test_id") or test_case.get("_meta", {}).get("test_id", "unknown")
         tc_name = test_case.get("name", tc_id)
         start   = time.monotonic()
         

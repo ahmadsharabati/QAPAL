@@ -301,7 +301,7 @@ class TestGenerator:
         )
 
         try:
-            raw = self._ai.complete(prompt, system_prompt=_GENERATOR_SYSTEM, max_tokens=4096, temperature=0)
+            raw = self._ai.complete(prompt, system_prompt=_GENERATOR_SYSTEM, max_tokens=8192, temperature=0)
         except Exception as e:
             raise PlanningError(f"AI call failed: {e}")
 

@@ -1142,8 +1142,9 @@ def validate_selector(selector: dict, field_name: str = "selector") -> List[str]
         errors.append(f"'{field_name}' missing required field: 'strategy'")
         return errors
     
-    valid_strategies = ["role", "testid", "css", "xpath", "text", "label", 
-                        "placeholder", "alt_text", "title", "aria-label"]
+    valid_strategies = ["role", "testid", "testid_prefix", "css", "xpath", "text", "label",
+                        "placeholder", "alt_text", "title", "aria-label", "role+container",
+                        "aria_label", "id"]
     if strategy not in valid_strategies:
         errors.append(f"'{field_name}' has invalid strategy: '{strategy}'")
     
@@ -1182,8 +1183,9 @@ def action_to_schema() -> dict:
             "properties": {
                 "strategy": {
                     "type": "string",
-                    "enum": ["role", "testid", "css", "xpath", "text", "label",
-                            "placeholder", "alt_text", "title", "aria-label"],
+                    "enum": ["role", "testid", "testid_prefix", "css", "xpath", "text", "label",
+                            "placeholder", "alt_text", "title", "aria-label", "role+container",
+                            "aria_label", "id"],
                 },
                 "value": {
                     "oneOf": [

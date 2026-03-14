@@ -244,52 +244,54 @@ async def cmd_run(args):
 
     ai          = _get_ai_client()
     db          = LocatorDB()
-    sg          = StateGraph(db)
-    credentials = _load_credentials(args)
-    t0          = time.monotonic()
-    results     = []
+    try:
+        sg          = StateGraph(db)
+        credentials = _load_credentials(args)
+        t0          = time.monotonic()
+        results     = []
 
-    print(f"\n Running {len(valid_plans)} test(s)")
+        print(f"\n Running {len(valid_plans)} test(s)")
 
-    headless_mode = True if args.headless else None
-    async with Executor(db, headless=headless_mode, ai_client=ai,
-                        credentials=credentials, state_graph=sg) as exc:
-        for plan in valid_plans:
-            tc_id = plan.get("id") or plan.get("test_id") or plan.get("_meta", {}).get("test_id", "?")
-            print(f"  {tc_id} ...", end=" ", flush=True)
-            result = await exc.run(plan)
-            results.append(result)
-            icon = "✓" if result["status"] == "pass" else "✗"
-            print(f"{icon} {result['status']}  ({result['duration_ms']}ms)")
-            if result["status"] == "fail":
-                for s in result.get("steps", []):
-                    if s.get("status") == "fail":
-                        print(f"    step fail: {s.get('reason')}")
-                for a in result.get("assertions", []):
-                    if a.get("status") == "fail":
-                        print(f"    assert fail: {a.get('reason')}")
+        headless_mode = True if args.headless else None
+        async with Executor(db, headless=headless_mode, ai_client=ai,
+                            credentials=credentials, state_graph=sg) as exc:
+            for plan in valid_plans:
+                tc_id = plan.get("id") or plan.get("test_id") or plan.get("_meta", {}).get("test_id", "?")
+                print(f"  {tc_id} ...", end=" ", flush=True)
+                result = await exc.run(plan)
+                results.append(result)
+                icon = "✓" if result["status"] == "pass" else "✗"
+                print(f"{icon} {result['status']}  ({result['duration_ms']}ms)")
+                if result["status"] == "fail":
+                    for s in result.get("steps", []):
+                        if s.get("status") == "fail":
+                            print(f"    step fail: {s.get('reason')}")
+                    for a in result.get("assertions", []):
+                        if a.get("status") == "fail":
+                            print(f"    assert fail: {a.get('reason')}")
 
-    duration = int((time.monotonic() - t0) * 1000)
-    passed   = sum(1 for r in results if r.get("status") == "pass")
-    failed   = len(results) - passed
+        duration = int((time.monotonic() - t0) * 1000)
+        passed   = sum(1 for r in results if r.get("status") == "pass")
+        failed   = len(results) - passed
 
-    print(f"\n   passed: {passed}  failed: {failed}  duration: {duration}ms")
+        print(f"\n   passed: {passed}  failed: {failed}  duration: {duration}ms")
 
-    # Save report
-    output_dir = Path(args.output or "reports")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    ts          = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_path = output_dir / f"report_{ts}.json"
-    with open(report_path, "w") as f:
-        json.dump({
-            "summary":      {"total": len(results), "passed": passed, "failed": failed, "duration_ms": duration},
-            "results":      results,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-        }, f, indent=2)
-    print(f"   report  → {report_path}")
+        # Save report
+        output_dir = Path(args.output or "reports")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        ts          = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        report_path = output_dir / f"report_{ts}.json"
+        with open(report_path, "w") as f:
+            json.dump({
+                "summary":      {"total": len(results), "passed": passed, "failed": failed, "duration_ms": duration},
+                "results":      results,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            }, f, indent=2)
+        print(f"   report  → {report_path}")
 
-    db.close()
-    return 1 if failed else 0
+        return 1 if failed else 0
+    finally:
+        db.close()
 
 
 async def cmd_status(args):
@@ -445,7 +447,7 @@ async def cmd_prd_run(args):
 
     report_dir = Path("reports")
     report_dir.mkdir(parents=True, exist_ok=True)
-    ts          = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts          = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     report_path = report_dir / f"prd_report_{ts}.json"
     with open(report_path, "w") as f:
         json.dump({
@@ -737,7 +739,6 @@ def main():
         return 1
 
     try:
-        import asyncio
         if args.cmd == "crawl":
             return asyncio.run(cmd_crawl(args))
         elif args.cmd == "semantic":

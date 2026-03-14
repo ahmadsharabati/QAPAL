@@ -308,7 +308,7 @@ class LocatorDB:
             if not actionable and not existing:
                 return None
 
-            warnings = self._warnings(page_url, role, name, container, chain, actionable)
+            warnings = self._warnings(page_url, role, name, container, chain, actionable, exclude_id=doc_id)
 
             if existing:
                 old_chain = existing["locators"]["chain"]
@@ -384,6 +384,7 @@ class LocatorDB:
         container: str,
         chain:     list,
         actionable: bool,
+        exclude_id: Optional[str] = None,
     ) -> List[str]:
         """Generate quality warnings. Must be called inside lock."""
         w = []
@@ -397,6 +398,7 @@ class LocatorDB:
                 if d.get("url") == url
                 and d.get("identity", {}).get("role") == role
                 and _normalise_name(d.get("identity", {}).get("name", "")) == _normalise_name(name)
+                and d.get("id") != exclude_id
             ]
             if len(dupes) >= 1:
                 w.append(
