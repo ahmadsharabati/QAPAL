@@ -402,11 +402,13 @@ class TestGenerator:
 
         transitions = self._state_graph.all_transitions()
         current_url = ""
+        nav_graph_resolved = False  # True only when a click matched a nav graph transition
 
         for step in steps:
             action = step.get("action", "")
             if action == "navigate":
                 current_url = step.get("url", current_url)
+                nav_graph_resolved = True  # navigate steps give us a known URL
             elif action == "click" and current_url:
                 sel   = step.get("selector", {})
                 val   = sel.get("value", "")
@@ -445,6 +447,11 @@ class TestGenerator:
                 if matches:
                     best = max(matches, key=lambda t: t["traversal_count"])
                     current_url = best["to_url"]
+                    nav_graph_resolved = True
+                else:
+                    # No nav graph transition found for this click — destination unknown.
+                    # Mark as unresolved so we don't override the AI's assertion below.
+                    nav_graph_resolved = False
 
         if not current_url:
             return plan
@@ -462,8 +469,12 @@ class TestGenerator:
                 # Normalise asserted value: strip dynamic IDs for comparison
                 aval_stripped = self._strip_dynamic_id(aval)
                 url_stripped  = self._strip_dynamic_id(current_url)
-                # Check if asserted value is consistent with the tracked URL
-                if aval_stripped not in url_stripped and url_stripped not in aval_stripped:
+                # Check if asserted value is consistent with the tracked URL.
+                # Only override if the nav graph actually resolved the destination URL —
+                # if the last click had no matching transition, the nav graph is incomplete
+                # and we must trust the AI's assertion rather than replacing it with a
+                # stale URL from an earlier step.
+                if nav_graph_resolved and aval_stripped not in url_stripped and url_stripped not in aval_stripped:
                     # Replace with url_contains of the expected (generic) path
                     fixed.append({**a, "type": "url_contains", "value": curr_path,
                                    "_auto_fixed": True, "_original_value": aval})

@@ -13,6 +13,7 @@ __pycache__/
 venv/
 dist/
 build/
+plans/
 
 # Data files (large / runtime-generated)
 locators.json
