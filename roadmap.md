@@ -39,15 +39,17 @@ Current state: **5/5 on practicesoftwaretesting.com, 5/5 on books.toscrape.com, 
 |---|----------|------|------|
 | 1 | ✅ ~~P0~~ | `generator.py` | ~~Wrong ARIA role~~ — fixed in 13bfc00 |
 | 2 | ✅ ~~P0~~ | `crawler.py` + `locator_db.py` | ~~Unnamed buttons missing from DB~~ — fixed in 13bfc00 |
-| 3 | 🟡 P1 | `locator_db.py` + `state_graph.py` + `crawler.py` | DOM Template Fingerprinting — skip re-crawling structurally identical pages |
-| 4 | 🟡 P1 | `executor.py` | Small model for AI rediscovery path (`QAPAL_AI_REDISCOVERY`) |
-| 5 | 🟢 P2 | `action_miner.py` + `site_compiler.py` + `generator.py` + `main.py` | **Compiled Site Model & UI Action Mining Engine** — 90% token reduction, reusable actions |
-| 6 | 🟢 P3 | `crawler.py` + `main.py` | Wire `classify_page_change()` into graph-crawl to tag edges with `page_change_type` |
-| 7 | 🟢 P3 | `crawler.py` | No-revisit enforcement — use `has_state()` in BFS instead of in-memory set |
-| 8 | 🔵 P4 | `crawler.py` + `state_graph.py` | Screenshot per page node during crawl → `reports/states/<state_id>.png` |
-| 9 | ⬜ P5 | `main.py` + `executor.py` | Structured JSON run report |
-| 10 | ⬜ P5 | `executor.py` | Concurrent test execution (`--parallel N`) |
-| 11 | ⬜ P5 | `executor.py` | Visual regression baseline + diff |
+| 3 | 🔴 **P1** | `executor.py` | **Passive error interception** — console errors, network failures, JS exceptions on every run |
+| 4 | 🔴 **P1** | `executor.py` + `main.py` | **Visual regression baseline + diff** — screenshot per assertion, pixel-diff on re-runs |
+| 5 | 🟡 P1 | `locator_db.py` + `state_graph.py` + `crawler.py` | DOM Template Fingerprinting — skip re-crawling structurally identical pages |
+| 6 | 🟡 P1 | `executor.py` | Small model for AI rediscovery path (`QAPAL_AI_REDISCOVERY`) |
+| 7 | 🟢 **P2** | `generator.py` + `main.py` | **Negative test generation** — failure-path + boundary/edge-case tests from existing PRD |
+| 8 | 🟢 P2 | `action_miner.py` + `site_compiler.py` + `generator.py` + `main.py` | Compiled Site Model & UI Action Mining Engine — 90% token reduction, reusable actions |
+| 9 | 🟢 P3 | `crawler.py` + `main.py` | Wire `classify_page_change()` into graph-crawl to tag edges with `page_change_type` |
+| 10 | 🟢 P3 | `crawler.py` | No-revisit enforcement — use `has_state()` in BFS instead of in-memory set |
+| 11 | 🔵 P4 | `crawler.py` + `state_graph.py` | Screenshot per page node during crawl → `reports/states/<state_id>.png` |
+| 12 | ⬜ P5 | `main.py` + `executor.py` | Structured JSON run report |
+| 13 | ⬜ P5 | `executor.py` | Concurrent test execution (`--parallel N`) |
 
 ---
 
@@ -229,6 +231,158 @@ def inherit_locators(self, source_url: str, target_url: str) -> int:
 The AI rediscovery path (`QAPAL_AI_REDISCOVERY`) currently uses the same large model as generation. `model_override` is already implemented in `ai_client.py` — the executor just needs to pass `model_override=self._ai.small_model` to the existing `ai_client.complete()` call in the rediscovery code path.
 
 **Token cost reduction:** ~90% cheaper per recovery call.
+
+---
+
+## 🔴 P1 — Passive Error Interception
+
+**File:** `executor.py`
+
+### Problem
+
+Tests can pass all assertions while the site has real bugs: an API returns 500 but the UI masks it, a JS exception fires but the page looks fine, a third-party resource fails and breaks a feature silently. No assertion catches these — they require passive monitoring.
+
+### Implementation
+
+After page creation (line ~1232 in `executor.py`), attach Playwright event listeners before the step loop:
+
+```python
+_console_errors: list[dict] = []
+_network_failures: list[dict] = []
+_js_exceptions: list[str] = []
+
+page.on("console",       lambda msg: _console_errors.append({"text": msg.text, "url": msg.location.get("url","")}) if msg.type == "error" else None)
+page.on("requestfailed", lambda req: _network_failures.append({"url": req.url, "failure": req.failure}) if _is_signal_failure(req.url, base_url) else None)
+page.on("pageerror",     lambda err: _js_exceptions.append(str(err)))
+```
+
+**Noise filter** — skip CDN assets, analytics, fonts, static files:
+```python
+_NOISE_DOMAINS = ("google-analytics.com", "doubleclick.net", "fonts.googleapis.com", "sentry.io")
+_NOISE_EXTS    = (".png", ".jpg", ".gif", ".woff", ".woff2", ".svg", ".ico", ".css")
+
+def _is_signal_failure(url: str, base_url: str) -> bool:
+    if any(d in url for d in _NOISE_DOMAINS): return False
+    if any(url.endswith(e) for e in _NOISE_EXTS): return False
+    return True
+```
+
+**Result enrichment** — add before returning result dict:
+```python
+result["passive_errors"] = {
+    "console_errors":    _console_errors,
+    "network_failures":  _network_failures,
+    "js_exceptions":     _js_exceptions,
+}
+result["has_passive_errors"] = bool(_console_errors or _network_failures or _js_exceptions)
+```
+
+`has_passive_errors=True` does **not** flip `passed` — it's a warning. The `main.py` summary prints a separate "Passive errors detected" section listing affected tests.
+
+**Files:** `executor.py` only. No new dependencies.
+
+---
+
+## 🔴 P1 — Visual Regression Baseline + Diff
+
+**Files:** `executor.py`, `main.py`, `requirements.txt`
+
+### Problem
+
+Functional assertions pass even when the page looks broken: layout shifts, missing images, wrong colors, overlapping elements. Visual regression catches these automatically once a baseline exists.
+
+### Implementation
+
+**New env vars:**
+```bash
+QAPAL_VISUAL_REGRESSION=false   # opt-in (default off)
+QAPAL_VISUAL_THRESHOLD=0.02     # 2% pixel diff tolerance
+```
+
+**New dependency:** `Pillow>=10.0.0`
+
+**Baseline directory structure:**
+```
+reports/
+  baseline/<test_id>/assertion_0.png, assertion_1.png, ...
+  visual_diff/<test_id>_<ts>/assertion_0_diff.png  ← red pixels = regressions
+```
+
+**In `_run_assertion()`** — after each assertion, if `QAPAL_VISUAL_REGRESSION=true`:
+```python
+async def _compare_visual(page, test_id, i) -> dict | None:
+    from PIL import Image, ImageChops
+    baseline = SCREENSHOT_DIR / "baseline" / test_id / f"assertion_{i}.png"
+    if not baseline.exists():
+        baseline.parent.mkdir(parents=True, exist_ok=True)
+        await page.screenshot(path=str(baseline), full_page=False)
+        return None  # first run — save baseline, no diff
+    current = SCREENSHOT_DIR / "visual_diff" / f"{test_id}_{_ts()}" / f"assertion_{i}.png"
+    current.parent.mkdir(parents=True, exist_ok=True)
+    await page.screenshot(path=str(current), full_page=False)
+    img_a = Image.open(baseline).convert("RGB")
+    img_b = Image.open(current).convert("RGB").resize(img_a.size)
+    diff  = ImageChops.difference(img_a, img_b)
+    diff_pct = sum(1 for r,g,b in diff.getdata() if r+g+b > 30) / (img_a.width * img_a.height)
+    if diff_pct > VISUAL_THRESHOLD:
+        return {"assertion_index": i, "diff_pct": round(diff_pct, 4),
+                "baseline": str(baseline), "current": str(current)}
+    return None
+```
+
+Add `visual_regressions` list to result; `main.py` prints "VISUAL REGRESSIONS" warning section.
+
+**CLI:** `--update-baseline` flag in `prd-run` / `run` deletes existing baseline for affected tests.
+
+---
+
+## 🟢 P2 — Negative Test Generation + Form Boundary Testing
+
+**Files:** `generator.py`, `main.py`
+
+### Problem
+
+QAPAL only tests happy paths. Real bugs hide on error paths: wrong credentials, empty required fields, too-long inputs, special characters. These are never exercised.
+
+### Solution
+
+One extra AI call per `prd-run` (when `--negative-tests` flag is set) generates failure-path and boundary-value test cases from the existing positive plans. Selectors are reused — no extra crawling needed.
+
+### Implementation
+
+**New CLI flag:** `--negative-tests` (off by default)
+
+**New method `TestGenerator.generate_negative_plans()`:**
+
+```python
+_NEGATIVE_SYSTEM = """
+You are a security-aware QA engineer generating NEGATIVE test cases.
+Rules:
+1. For each positive test with a login/form step, generate ONE failure-path test:
+   wrong credentials, missing required field, or invalid email format.
+2. For each positive test with form fill steps, generate ONE boundary test using:
+   - Empty string for a required field
+   - A 1001-character string for a text input
+   - The value: <script>alert(1)</script> for any text field
+   - The value: ' OR 1=1-- for any text field
+3. Assertions must check element_visible for an error message — NOT url_contains navigation.
+4. Reuse selectors from the positive plan exactly. Do not invent new selectors.
+5. Test ID: {positive_id}_neg (failure path), {positive_id}_boundary (edge cases).
+6. Output: JSON array of test plans (same schema as positive plans).
+"""
+```
+
+**Integration after positive plan generation:**
+```python
+if self._negative_tests:
+    raw_neg = self._ai.complete(neg_prompt, system_prompt=_NEGATIVE_SYSTEM, ...)
+    neg_plans = self._parse_plans(raw_neg)   # run same post-processor chain
+    parsed_plans.extend(neg_plans)
+```
+
+**Plan naming:** `bookshop-TC001_login_neg.json`, `bookshop-TC001_login_boundary.json`
+
+**Files:** `generator.py` (`generate_negative_plans()` + `_negative_tests` flag in `__init__`), `main.py` (`--negative-tests` arg)
 
 ---
 
