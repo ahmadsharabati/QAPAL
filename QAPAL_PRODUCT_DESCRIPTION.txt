@@ -1,0 +1,221 @@
+QAPAL — Deterministic AI-Powered UI Test Automation Framework
+==============================================================
+
+Core Principle: AI plans once. Code executes deterministically.
+
+
+THREE-PHASE PIPELINE
+====================
+
+Phase 1 — Crawling (crawler.py + locator_db.py)
+------------------------------------------------
+- Playwright navigates live pages, extracts every interactive element via two strategies:
+  1. Accessibility tree (primary) — ARIA roles, names, shadow DOM
+  2. DOM fallback — data-testid, onclick handlers, tabindex
+- Hover-triggers menus/dropdowns before extraction to capture hidden elements
+- Stores elements in TinyDB (locators.json) with a locator chain per element:
+  testid -> id -> role -> text -> aria-label -> placeholder -> css
+- Dynamic name normalization strips prices, timestamps, counters for stable locators
+- Stale check: skips re-crawl if data < 60 min old
+- Spider mode: BFS link discovery to map entire sites automatically
+- Authentication support: stored cookies or automated login flows
+
+
+Phase 2 — Planning (planner.py + generator.py)
+-----------------------------------------------
+- Takes a test case description (or a full PRD markdown doc) + locators from DB
+  + semantic page context + navigation graph
+- Makes ONE AI call per test to produce a frozen JSON execution plan
+- Validates that every element_id in the plan actually exists in the DB (no hallucination)
+- Retry loop (up to 3 attempts) if AI hallucinates selectors
+- Plans include primary selectors + fallbacks for every element
+- Generator can produce multiple plans from a single PRD, with slug-based
+  prefixing to avoid ID clashes
+
+
+Phase 3 — Execution (executor.py)
+----------------------------------
+- Runs the frozen JSON plan WITHOUT any AI calls on the happy path
+- Locator resolution chain:
+  primary -> fallback -> AI rediscovery (1 emergency call) -> hard fail + screenshot
+- Executes 19 action types:
+  navigate, click, fill, select, hover, scroll, dblclick, type, clear, press,
+  check, uncheck, focus, blur, refresh, go_back, go_forward, wait, screenshot, evaluate
+- Validates 30+ assertion types:
+  URL checks, visibility, text content, attributes, element state, JS evaluation
+- Self-healing via replanner.py: on unexpected state, makes ONE emergency AI call
+  to patch remaining steps (capped at 1 replan per test, 3 unknown states per run)
+- Records page transitions to the State Graph for future learning
+
+
+SUPPORTING SYSTEMS
+==================
+
+State Graph (state_graph.py)
+  Directed graph of page transitions (from_url --[click "label"]--> to_url).
+  Grows over time as more tests run. Provides BFS shortest-path queries and
+  navigation context for AI prompts.
+
+Semantic Extractor (semantic_extractor.py)
+  Extracts structured page data (headings, buttons, links, forms, tables) via
+  Crawl4AI or a11y snapshot fallback. Stored separately from locators — can
+  reprocess without re-crawling.
+
+AI Client (ai_client.py)
+  Unified interface for Anthropic Claude, OpenAI GPT-4, and xAI Grok.
+  Two-tier model support (main model for planning, small model for
+  validation/recovery).
+
+Actions Registry (actions.py) — 19 action types
+  Category        Actions
+  Navigation      navigate, refresh, go_back, go_forward
+  Interaction     click, dblclick, hover, scroll
+  Input           fill, type, clear, press, select
+  State           check, uncheck, focus, blur
+  Utility         wait, screenshot, evaluate
+
+Assertions Registry (assertions.py) — 30+ assertion types
+  Category        Assertion Types
+  URL             url_equals, url_contains, url_matches
+  Page            title_equals, title_contains
+  Existence       element_exists, element_not_exists
+  Visibility      element_visible, element_hidden, element_in_viewport
+  State           element_enabled, element_disabled, element_checked,
+                  element_unchecked, element_focused, element_editable,
+                  element_readonly
+  Content         element_text_equals, element_text_contains,
+                  element_text_matches, element_value_equals,
+                  element_value_contains
+  Attributes      element_attribute, element_has_class, element_has_style,
+                  element_count
+  Custom          javascript
+
+
+CLI COMMANDS (via main.py)
+==========================
+
+  crawl        Extract elements from URLs into locator DB
+  semantic     Extract semantic page context (after crawl)
+  plan         Generate execution plans from test case JSON
+  run          Execute pre-generated plans
+  prd-run      Full pipeline: crawl -> semantic -> plan -> execute -> report
+  graph-crawl  BFS navigate site, record transitions + crawl each page
+  graph        Display/query the state navigation graph
+  status       Show DB stats, graph edges, AI client info
+
+
+SELECTOR STRATEGIES (priority order)
+=====================================
+
+  1. testid          data-testid attribute (most stable)
+  2. id              semantic element ID (not auto-generated)
+  3. role            ARIA role + accessible name
+  4. role+container  scoped by parent landmark
+  5. text            visible text content
+  6. aria-label      explicit accessibility label
+  7. placeholder     input placeholder
+  8. css             last resort (fragile)
+
+
+PLAN JSON FORMAT
+================
+
+  {
+    "test_id": "TC001_login",
+    "name": "User can log in successfully",
+    "steps": [
+      {"action": "navigate", "url": "https://app.com/login"},
+      {"action": "fill", "selector": {"strategy": "testid", "value": "email"}, "value": "user@example.com"},
+      {"action": "click", "selector": {"strategy": "testid", "value": "login-submit"}}
+    ],
+    "assertions": [
+      {"type": "url_equals", "value": "https://app.com/account"}
+    ],
+    "_meta": {
+      "source": "prd_generator",
+      "planned_at": "2026-03-12T...",
+      "locators": 347,
+      "ai_model": "..."
+    }
+  }
+
+
+DATA STORAGE (locator_db.py — TinyDB)
+======================================
+
+  locators      Element records with locator chains, hit/miss history, warnings
+  pages         Per-page metadata (element counts, last crawled timestamp)
+  sessions      Domain authentication state (cookies/storage)
+  states        URL + DOM hash + semantic context (for replanning)
+  transitions   Page transition edges (StateGraph data)
+
+  Identity key: url + role + name + container + frame_url + dom_path (hashed to 16-char ID)
+  Dynamic name normalization strips prices ($1.99), timestamps (12:30), dates, counters
+  Soft decay: marks elements invalid after 3 consecutive misses
+
+
+ENVIRONMENT VARIABLES
+=====================
+
+  # AI Provider (required — pick one)
+  QAPAL_AI_PROVIDER=anthropic       anthropic | openai | grok
+  ANTHROPIC_API_KEY=...             For Claude
+  OPENAI_API_KEY=...                For GPT-4
+  XAI_API_KEY=...                   For Grok
+
+  # Storage
+  QAPAL_DB_PATH=locators.json       Path to TinyDB store
+
+  # Browser
+  QAPAL_HEADLESS=true               Run headlessly
+  QAPAL_SCREENSHOTS=reports/screenshots
+
+  # Timeouts (milliseconds)
+  QAPAL_ACTION_TIMEOUT=10000        Default: 10s
+  QAPAL_ASSERTION_TIMEOUT=5000      Default: 5s
+
+  # Self-Healing / Recovery
+  QAPAL_AI_REDISCOVERY=true         Enable AI fallback for missing locators
+  QAPAL_MAX_REPLANS=1               Max recovery attempts per test
+  QAPAL_MAX_UNKNOWN_STATES=3        Max unexpected states before hard fail
+  QAPAL_MAX_URL_VISITS=3            Max times to visit same URL
+
+  # Crawling
+  CRAWLER_STALE_MINUTES=60          Skip re-crawl if < N minutes old
+  QAPAL_CRAWL_CONCURRENCY=3         Parallel crawl workers
+
+
+KEY DESIGN PROPERTIES
+=====================
+
+  Token efficiency    ~500 tokens/test vs ~4000+ in traditional AI-in-the-loop (~87.5% savings)
+  Deterministic       No randomness in execution; plans are frozen JSON, cacheable, version-controllable
+  Self-learning       State graph + hit counts accumulate over time, improving future plans
+  Soft decay          Elements not seen in recent crawls get invalidated after N misses (threshold: 3)
+  Thread safety       All DB writes serialized via RLock; parallel crawling uses semaphore
+  Contract-based      actions.py and assertions.py are the single source of truth for AI and executor
+
+
+REPOSITORY STRUCTURE
+====================
+
+  QAPAL/
+  ├── main.py                CLI orchestrator (entry point)
+  ├── executor.py            Deterministic test runner (~1550 lines, largest file)
+  ├── assertions.py          Assertion registry (~1500 lines, 30+ assertion types)
+  ├── actions.py             Action registry (~1266 lines, 19 action types)
+  ├── crawler.py             Page crawler + element extraction (~841 lines)
+  ├── generator.py           PRD -> test plan generator (~780 lines)
+  ├── locator_db.py          TinyDB wrapper for persistent locator state (~652 lines)
+  ├── planner.py             Lower-level test planner (~554 lines)
+  ├── state_graph.py         Navigation graph mapper (~514 lines)
+  ├── ai_client.py           Unified AI provider wrapper (~244 lines)
+  ├── semantic_extractor.py  Page understanding / semantic context (~221 lines)
+  ├── replanner.py           Self-healing recovery logic (~167 lines)
+  ├── smoke_semantic.py      Diagnostic utility for semantic extraction
+  ├── __init__.py            Package exports
+  ├── requirements.txt       Dependencies
+  ├── tests/
+  │   ├── test.py            Unit tests (mocked, no network)
+  │   └── test_e2e.py        End-to-end integration tests
+  └── plans/                 Generated JSON test plans (TC*.json)

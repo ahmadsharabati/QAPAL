@@ -207,12 +207,25 @@ _ERROR_CONTAINER_JS = """
     });
 
     // 3. Class-based (.error-message, .alert-danger, .invalid-feedback, etc.)
+    //    Match keyword as a hyphen/underscore-delimited segment to avoid false
+    //    positives like .alert-info, .alert-success, .message-sender.
+    const ERROR_SEGMENTS = ['error', 'danger', 'invalid', 'warning', 'toast'];
+    const VALID_COMPOUNDS = [
+        'alert-danger', 'alert-error', 'alert-warning',
+        'invalid-feedback', 'error-message', 'error-text',
+        'form-error', 'field-error', 'validation-error',
+    ];
     document.querySelectorAll('[class]').forEach(el => {
         const cls = el.className;
         if (typeof cls !== 'string') return;
         const parts = cls.split(/\\s+/);
         for (const p of parts) {
-            if (p && KEYWORDS.some(k => p.toLowerCase().includes(k))) {
+            if (!p) continue;
+            const lower = p.toLowerCase();
+            const segments = lower.split(/[-_]/);
+            const matched = ERROR_SEGMENTS.some(k => segments.includes(k))
+                         || VALID_COMPOUNDS.includes(lower);
+            if (matched) {
                 results.add('.' + p);
                 break;
             }
