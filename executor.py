@@ -72,14 +72,14 @@ _NOISE_DOMAINS = (
 )
 _NOISE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico",
                ".woff", ".woff2", ".ttf", ".otf", ".svg", ".css", ".map")
+_EXTRA_NOISE_DOMAINS = tuple(d.strip() for d in os.getenv("QAPAL_NOISE_DOMAINS", "").split(",") if d.strip())
+_ALL_NOISE_DOMAINS = _NOISE_DOMAINS + _EXTRA_NOISE_DOMAINS
 
 def _is_signal_failure(url: str, base_url: str) -> bool:
     """Return True for failures worth flagging (same-origin or known API calls)."""
     from urllib.parse import urlparse as _up
     parsed = _up(url)
-    # Allow user-defined extra noise domains via env
-    extra_noise = tuple(d.strip() for d in os.getenv("QAPAL_NOISE_DOMAINS", "").split(",") if d.strip())
-    if any(d in parsed.netloc for d in _NOISE_DOMAINS + extra_noise):
+    if any(d in parsed.netloc for d in _ALL_NOISE_DOMAINS):
         return False
     if any(url.lower().endswith(ext) for ext in _NOISE_EXTS):
         return False
@@ -128,23 +128,48 @@ async def _visual_compare(page, test_id: str, step_index: int) -> dict | None:
         current_img  = Image.open(curr_path).convert("RGB")
 
         if baseline_img.size != current_img.size:
+            log.warning("Visual regression: viewport size changed from %s to %s for %s step %d — resizing to compare",
+                        baseline_img.size, current_img.size, test_id, step_index)
             current_img = current_img.resize(baseline_img.size, Image.LANCZOS)
 
         diff = ImageChops.difference(baseline_img, current_img)
-        pixels    = list(diff.getdata())
-        diff_count = sum(1 for r, g, b in pixels if r + g + b > 30)
-        diff_pct   = diff_count / max(len(pixels), 1)
+
+        # Use NumPy for fast pixel diffing when available
+        try:
+            import numpy as np
+            diff_arr = np.array(diff)                       # (H, W, 3)
+            channel_sum = diff_arr.sum(axis=2)              # (H, W)
+            mask = channel_sum > 30
+            diff_count = int(mask.sum())
+            total_pixels = mask.size
+        except ImportError:
+            pixels = list(diff.getdata())
+            diff_count = sum(1 for r, g, b in pixels if r + g + b > 30)
+            total_pixels = max(len(pixels), 1)
+
+        diff_pct = diff_count / max(total_pixels, 1)
 
         if diff_pct > VISUAL_THRESHOLD:
             # Highlight diff pixels in red and save
-            from PIL import ImageDraw
-            diff_vis = current_img.copy()
-            draw     = ImageDraw.Draw(diff_vis)
-            width    = baseline_img.width
-            for idx, (r, g, b) in enumerate(pixels):
-                if r + g + b > 30:
-                    x, y = idx % width, idx // width
-                    draw.point((x, y), fill=(255, 0, 0))
+            try:
+                import numpy as np
+                current_arr = np.array(current_img)         # (H, W, 3)
+                if 'mask' not in dir():
+                    diff_arr = np.array(diff)
+                    mask = diff_arr.sum(axis=2) > 30
+                current_arr[mask] = [255, 0, 0]
+                diff_vis = Image.fromarray(current_arr)
+            except ImportError:
+                from PIL import ImageDraw
+                diff_vis = current_img.copy()
+                draw     = ImageDraw.Draw(diff_vis)
+                width    = baseline_img.width
+                if 'pixels' not in dir():
+                    pixels = list(diff.getdata())
+                for idx, (r, g, b) in enumerate(pixels):
+                    if r + g + b > 30:
+                        x, y = idx % width, idx // width
+                        draw.point((x, y), fill=(255, 0, 0))
             diff_vis.save(str(diff_path))
 
             return {

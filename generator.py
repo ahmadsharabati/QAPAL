@@ -325,13 +325,13 @@ RULES:
 1. For each positive test that fills a form, generate ONE failure-path test using wrong/missing inputs.
    - Wrong credentials → assert error message visible using the error_containers from context
    - Missing required field → assert validation error visible
-   - Test ID: {positive_id}_neg
+   - Test ID: append "_neg" to the positive test's test_id (e.g. TC001_login → TC001_login_neg)
 2. For each positive test that fills a form, generate ONE boundary test with edge-case inputs:
    - Use empty string for one required field
    - Use a 256-character string for a text input
    - Use value: <script>alert(1)</script> for a text input (XSS probe)
    - Use value: ' OR 1=1-- for a text input (SQLi probe)
-   - Test ID: {positive_id}_boundary
+   - Test ID: append "_boundary" to the positive test's test_id (e.g. TC001_login → TC001_login_boundary)
 3. Assertions MUST check element_visible on an error container, NOT url navigation.
    Use the exact error_containers selectors provided in the context.
 4. Use IDENTICAL selectors from the positive plan — never invent new ones.
