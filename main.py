@@ -46,6 +46,39 @@ except ImportError:
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
+def _print_visual_regression_summary(results: list) -> None:
+    """Print a warning block for any tests with visual regressions."""
+    flagged = [r for r in results if r.get("has_visual_regressions")]
+    if not flagged:
+        return
+    print(f"\n  ⚠  VISUAL REGRESSIONS detected in {len(flagged)} test(s):")
+    for r in flagged:
+        for vr in r.get("visual_regressions", []):
+            print(f"     {r['id']} step {vr['step_index']}: {vr['diff_pct']}% pixel diff")
+            print(f"       baseline → {vr['baseline']}")
+            print(f"       diff     → {vr['diff']}")
+
+
+def _print_passive_error_summary(results: list) -> None:
+    """Print a warning block for any tests that recorded passive errors."""
+    flagged = [r for r in results if r.get("has_passive_errors")]
+    if not flagged:
+        return
+    print(f"\n  ⚠  PASSIVE ERRORS detected in {len(flagged)} test(s):")
+    for r in flagged:
+        errs = r.get("passive_errors", {})
+        nc = len(errs.get("console_errors",   []))
+        nn = len(errs.get("network_failures", []))
+        nj = len(errs.get("js_exceptions",    []))
+        print(f"     {r['id']}: {nc} console error(s), {nn} network failure(s), {nj} JS exception(s)")
+        for e in errs.get("console_errors",   [])[:3]:
+            print(f"       console: {e['text'][:120]}")
+        for e in errs.get("network_failures", [])[:3]:
+            print(f"       network: {e['url'][:100]}  [{e.get('failure','')}]")
+        for e in errs.get("js_exceptions",    [])[:3]:
+            print(f"       js:      {str(e)[:120]}")
+
+
 def _load_json_files(patterns: List[str]) -> List[dict]:
     items = []
     for pattern in patterns:
@@ -275,6 +308,7 @@ async def cmd_run(args):
         failed   = len(results) - passed
 
         print(f"\n   passed: {passed}  failed: {failed}  duration: {duration}ms")
+        _print_passive_error_summary(results)
 
         # Save report
         output_dir = Path(args.output or "reports")
@@ -336,8 +370,17 @@ async def cmd_prd_run(args):
     sg = StateGraph(db)
     t0 = time.monotonic()
 
-    headless_mode = True if args.headless else None
-    credentials   = _load_credentials(args)
+    headless_mode   = True if args.headless else None
+    credentials     = _load_credentials(args)
+    update_baseline = getattr(args, "update_baseline", False)
+
+    # --update-baseline: wipe stored baselines so the next run re-captures them
+    if update_baseline:
+        import shutil
+        from executor import VISUAL_BASELINE_DIR
+        if VISUAL_BASELINE_DIR.exists():
+            shutil.rmtree(VISUAL_BASELINE_DIR)
+            print(f"\n  [baseline] Cleared visual regression baselines → {VISUAL_BASELINE_DIR}")
 
     # 1. Crawl — populates locator DB
     spider = getattr(args, "spider", False)
@@ -364,9 +407,10 @@ async def cmd_prd_run(args):
     processed = await _extract_semantics(db, urls, headless=headless_bool)
     print(f"   semantic contexts saved: {processed}/{len(urls)}")
 
-    num_tests = getattr(args, "num_tests", None)
+    num_tests       = getattr(args, "num_tests", None)
+    negative_tests  = getattr(args, "negative_tests", False)
     generator = TestGenerator(db, ai_client=ai, max_cases=args.max_cases, state_graph=sg,
-                              max_locators=400, num_tests=num_tests)
+                              max_locators=400, num_tests=num_tests, negative_tests=negative_tests)
     output_dir = Path(args.output or "plans")
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -444,6 +488,8 @@ async def cmd_prd_run(args):
 
     print(f"\n [5/5] Summary")
     print(f"   passed: {passed}  failed: {failed}  total duration: {duration}ms")
+    _print_passive_error_summary(all_results)
+    _print_visual_regression_summary(all_results)
 
     report_dir = Path("reports")
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -703,6 +749,10 @@ def main():
                    help="Follow links and crawl the whole site from the starting URLs")
     p.add_argument("--depth", type=int, default=2, metavar="N",
                    help="Max link-follow depth for --spider (default: 2)")
+    p.add_argument("--update-baseline", dest="update_baseline", action="store_true",
+                   help="Delete stored visual regression baselines before running (forces re-baseline)")
+    p.add_argument("--negative-tests", dest="negative_tests", action="store_true",
+                   help="Also generate negative and boundary test cases")
 
     # semantic
     p = sub.add_parser("semantic", help="Extract semantic context for URLs (run after crawl, before plan)")

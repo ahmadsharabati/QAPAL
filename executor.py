@@ -54,10 +54,124 @@ except ImportError:
 
 # ── Config ────────────────────────────────────────────────────────────
 
-SCREENSHOT_DIR    = Path(os.getenv("QAPAL_SCREENSHOTS", "reports/screenshots"))
-ACTION_TIMEOUT    = int(os.getenv("QAPAL_ACTION_TIMEOUT",    "10000"))
-ASSERTION_TIMEOUT = int(os.getenv("QAPAL_ASSERTION_TIMEOUT", "5000"))
-AI_REDISCOVERY    = os.getenv("QAPAL_AI_REDISCOVERY", "true").lower() == "true"
+SCREENSHOT_DIR      = Path(os.getenv("QAPAL_SCREENSHOTS", "reports/screenshots"))
+ACTION_TIMEOUT      = int(os.getenv("QAPAL_ACTION_TIMEOUT",    "10000"))
+ASSERTION_TIMEOUT   = int(os.getenv("QAPAL_ASSERTION_TIMEOUT", "5000"))
+AI_REDISCOVERY      = os.getenv("QAPAL_AI_REDISCOVERY", "true").lower() == "true"
+VISUAL_REGRESSION   = os.getenv("QAPAL_VISUAL_REGRESSION",  "false").lower() == "true"
+VISUAL_THRESHOLD    = float(os.getenv("QAPAL_VISUAL_THRESHOLD", "0.02"))
+VISUAL_BASELINE_DIR = SCREENSHOT_DIR / "baseline"
+VISUAL_DIFF_DIR     = SCREENSHOT_DIR / "visual_diff"
+
+# ── Passive error interception config ─────────────────────────────────
+_NOISE_DOMAINS = (
+    "google-analytics.com", "googletagmanager.com", "doubleclick.net",
+    "fonts.googleapis.com", "fonts.gstatic.com", "cdn.jsdelivr.net",
+    "gravatar.com", "sentry.io", "hotjar.com", "intercom.io",
+    "segment.com", "mixpanel.com", "amplitude.com", "facebook.net",
+)
+_NOISE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico",
+               ".woff", ".woff2", ".ttf", ".otf", ".svg", ".css", ".map")
+
+def _is_signal_failure(url: str, base_url: str) -> bool:
+    """Return True for failures worth flagging (same-origin or known API calls)."""
+    from urllib.parse import urlparse as _up
+    parsed = _up(url)
+    # Allow user-defined extra noise domains via env
+    extra_noise = tuple(d.strip() for d in os.getenv("QAPAL_NOISE_DOMAINS", "").split(",") if d.strip())
+    if any(d in parsed.netloc for d in _NOISE_DOMAINS + extra_noise):
+        return False
+    if any(url.lower().endswith(ext) for ext in _NOISE_EXTS):
+        return False
+    return True
+
+# ── Visual regression helpers ──────────────────────────────────────────
+
+def _ts() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+
+
+async def _visual_compare(page, test_id: str, step_index: int) -> dict | None:
+    """
+    Take a screenshot and compare against the stored baseline.
+
+    First run  → saves baseline, returns None (no diff yet).
+    Later runs → diffs current vs baseline.
+                 Returns diff dict if diff_pct > VISUAL_THRESHOLD, else None.
+
+    Requires Pillow (pip install Pillow). Silently skips if not installed.
+    """
+    try:
+        from PIL import Image, ImageChops
+    except ImportError:
+        return None
+
+    baseline_path = VISUAL_BASELINE_DIR / test_id / f"step_{step_index}.png"
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not baseline_path.exists():
+        # First run — save baseline and move on
+        await page.screenshot(path=str(baseline_path), full_page=False)
+        return None
+
+    # Subsequent run — capture current and diff
+    diff_dir  = VISUAL_DIFF_DIR / f"{test_id}_{_ts()}"
+    diff_dir.mkdir(parents=True, exist_ok=True)
+    curr_path = diff_dir / f"step_{step_index}_current.png"
+    diff_path = diff_dir / f"step_{step_index}_diff.png"
+
+    await page.screenshot(path=str(curr_path), full_page=False)
+
+    try:
+        baseline_img = Image.open(baseline_path).convert("RGB")
+        current_img  = Image.open(curr_path).convert("RGB")
+
+        if baseline_img.size != current_img.size:
+            current_img = current_img.resize(baseline_img.size, Image.LANCZOS)
+
+        diff = ImageChops.difference(baseline_img, current_img)
+        pixels    = list(diff.getdata())
+        diff_count = sum(1 for r, g, b in pixels if r + g + b > 30)
+        diff_pct   = diff_count / max(len(pixels), 1)
+
+        if diff_pct > VISUAL_THRESHOLD:
+            # Highlight diff pixels in red and save
+            from PIL import ImageDraw
+            diff_vis = current_img.copy()
+            draw     = ImageDraw.Draw(diff_vis)
+            width    = baseline_img.width
+            for idx, (r, g, b) in enumerate(pixels):
+                if r + g + b > 30:
+                    x, y = idx % width, idx // width
+                    draw.point((x, y), fill=(255, 0, 0))
+            diff_vis.save(str(diff_path))
+
+            return {
+                "step_index": step_index,
+                "diff_pct":   round(diff_pct * 100, 2),
+                "baseline":   str(baseline_path),
+                "current":    str(curr_path),
+                "diff":       str(diff_path),
+            }
+    except Exception:
+        pass
+
+    return None
+
+
+# Lazy singleton for the small-model AI client (element rediscovery)
+_small_ai_client_cache = None
+
+def _get_small_ai_client(fallback):
+    global _small_ai_client_cache
+    if _small_ai_client_cache is None:
+        try:
+            from ai_client import AIClient
+            _small_ai_client_cache = AIClient.small_from_env()
+        except Exception:
+            _small_ai_client_cache = fallback
+    return _small_ai_client_cache
 
 # Unknown-state recovery caps (all overridable via env vars)
 MAX_REPLANS_PER_TEST = int(os.getenv("QAPAL_MAX_REPLANS",       "1"))
@@ -387,7 +501,7 @@ Return JSON only — the best Playwright locator:
 {{"strategy": "role", "value": {{"role": "button", "name": "Submit"}}}}
 Valid strategies: role, testid, css, label, placeholder, aria-label"""
 
-        text = await ai_client.acomplete(prompt)
+        text = await _get_small_ai_client(ai_client).acomplete(prompt)
         text = text.strip()
         if "```" in text:
             text = text.split("```")[1].lstrip("json").strip().split("```")[0]
@@ -1231,12 +1345,35 @@ class Executor:
         )
         page = await ctx.new_page()
 
-        step_results      = []
-        assertion_results = []
-        failed_step       = None
-        current_url       = _normalize_url(test_case.get("url", ""))
-        passed            = False
-        final_screenshot  = None
+        # ── Passive error interception ─────────────────────────────────
+        _console_errors:   list = []
+        _network_failures: list = []
+        _js_exceptions:    list = []
+        _base_url = test_case.get("url", "")
+
+        def _on_console(msg):
+            if msg.type == "error":
+                _console_errors.append({
+                    "text": msg.text,
+                    "url":  msg.location.get("url", "") if hasattr(msg, "location") else "",
+                })
+
+        def _on_request_failed(req):
+            if _is_signal_failure(req.url, _base_url):
+                _network_failures.append({"url": req.url, "failure": req.failure})
+
+        page.on("console",       _on_console)
+        page.on("requestfailed", _on_request_failed)
+        page.on("pageerror",     lambda err: _js_exceptions.append(str(err)))
+        # ──────────────────────────────────────────────────────────────
+
+        step_results        = []
+        assertion_results   = []
+        visual_regressions  = []
+        failed_step         = None
+        current_url         = _normalize_url(test_case.get("url", ""))
+        passed              = False
+        final_screenshot    = None
 
         # Recovery state
         steps            = list(test_case.get("steps", []))
@@ -1256,6 +1393,14 @@ class Executor:
                     state_graph = self._state_graph,
                     session_id  = tc_id,
                 )
+
+                # Visual regression: snapshot after navigate or URL-changing actions
+                if VISUAL_REGRESSION and result.get("status") == "pass":
+                    action = step.get("action", "")
+                    if action == "navigate" or (action == "click" and current_url != url_before):
+                        vr = await _visual_compare(page, tc_id, i)
+                        if vr:
+                            visual_regressions.append(vr)
 
                 # Track URL visits for redirect-loop detection
                 if current_url != url_before:
@@ -1319,14 +1464,23 @@ class Executor:
         finally:
             await ctx.close()
 
+        passive_errors = {
+            "console_errors":   _console_errors,
+            "network_failures": _network_failures,
+            "js_exceptions":    _js_exceptions,
+        }
         return {
-            "id":          tc_id,
-            "name":        tc_name,
-            "status":      "pass" if passed else "fail",
-            "steps":       step_results,
-            "assertions":  assertion_results,
-            "duration_ms": int((time.monotonic() - start) * 1000),
-            "screenshot":  final_screenshot,
+            "id":                    tc_id,
+            "name":                  tc_name,
+            "status":                "pass" if passed else "fail",
+            "steps":                 step_results,
+            "assertions":            assertion_results,
+            "duration_ms":           int((time.monotonic() - start) * 1000),
+            "screenshot":            final_screenshot,
+            "passive_errors":        passive_errors,
+            "has_passive_errors":    bool(_console_errors or _network_failures or _js_exceptions),
+            "visual_regressions":    visual_regressions,
+            "has_visual_regressions": bool(visual_regressions),
         }
 # ── Standalone Testing ────────────────────────────────────────────────
 

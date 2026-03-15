@@ -300,16 +300,34 @@ def _format_semantic_contexts(states: List[dict]) -> str:
         if page: line += f" {page}"
         if desc: line += f": {desc}"
         lines.append(line)
-        h = ctx.get("headings", [])
-        b = ctx.get("buttons",  [])
-        lk = ctx.get("links",   [])
-        t = ctx.get("tables",   [])
-        f = ctx.get("forms",    [])
-        if h:  lines.append(f"  Headings: {', '.join(h[:5])}")
-        if b:  lines.append(f"  Buttons:  {', '.join(b[:10])}")
-        if lk: lines.append(f"  Links:    {', '.join(lk[:10])}")
-        if t:  lines.append(f"  Tables:   {', '.join(t[:5])}")
-        if f:  lines.append(f"  Forms:    {', '.join(f[:5])}")
+
+        h   = ctx.get("headings",         [])
+        b   = ctx.get("buttons",          [])
+        lk  = ctx.get("links",            [])
+        t   = ctx.get("tables",           [])
+        f   = ctx.get("forms",            [])
+        inp = ctx.get("inputs",           [])
+        err = ctx.get("error_containers", [])
+
+        if h:   lines.append(f"  Headings:         {', '.join(h[:5])}")
+        if b:   lines.append(f"  Buttons:          {', '.join(b[:10])}")
+        if lk:  lines.append(f"  Links:            {', '.join(lk[:10])}")
+        if t:   lines.append(f"  Tables:           {', '.join(t[:5])}")
+        if f:   lines.append(f"  Forms:            {', '.join(f[:5])}")
+        if inp:
+            # Compact format: "Email (email, testid=email-field) [required]"
+            parts = []
+            for i in inp[:12]:
+                label   = i.get("label") or i.get("placeholder") or i.get("type", "input")
+                details = i["type"]
+                if i.get("testid"):
+                    details += f", testid={i['testid']}"
+                s = f"{label} ({details})"
+                if i.get("required"):
+                    s += " [required]"
+                parts.append(s)
+            lines.append(f"  Form inputs:      {' | '.join(parts)}")
+        if err: lines.append(f"  Error containers: {', '.join(err[:8])}")
     return "\n".join(lines)
 
 

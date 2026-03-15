@@ -75,7 +75,9 @@ _GENERATOR_PROMPT = """## Base URLs (use these as the root for all navigate acti
 ## Product Requirements Document
 {prd_content}
 
-## Semantic Context (page structure)
+## Semantic Context (page structure, form fields, error containers)
+NOTE: "Form inputs" lists every fillable field and its testid. "Error containers" are selectors
+where validation errors appear — use these for element_visible assertions in error-path tests.
 {semantic_contexts}
 
 ## Navigation Graph
@@ -132,19 +134,21 @@ class TestGenerator:
 
     def __init__(
         self,
-        db:           LocatorDB,
-        ai_client:    Optional[AIClient] = None,
-        max_locators: int                = 80,
-        max_cases:    bool               = False,
-        state_graph                      = None,
-        num_tests:    Optional[int]      = None,
+        db:             LocatorDB,
+        ai_client:      Optional[AIClient] = None,
+        max_locators:   int                = 80,
+        max_cases:      bool               = False,
+        state_graph                        = None,
+        num_tests:      Optional[int]      = None,
+        negative_tests: bool               = False,
     ):
-        self._db           = db
-        self._ai           = ai_client
-        self._max_locators = max_locators
-        self._max_cases    = max_cases
-        self._state_graph  = state_graph
-        self._num_tests    = num_tests  # explicit count; overrides max_cases/default-5
+        self._db             = db
+        self._ai             = ai_client
+        self._max_locators   = max_locators
+        self._max_cases      = max_cases
+        self._state_graph    = state_graph
+        self._num_tests      = num_tests  # explicit count; overrides max_cases/default-5
+        self._negative_tests = negative_tests
 
     def generate_plans_from_prd(self, prd_content: str, urls: List[str], credentials: Optional[dict] = None) -> List[dict]:
         """
@@ -305,7 +309,97 @@ class TestGenerator:
         except Exception as e:
             raise PlanningError(f"AI call failed: {e}")
 
-        return self._parse_plans(raw, locator_map, base_url=urls[0] if urls else "", credentials=credentials, locators=locators)
+        positive_plans = self._parse_plans(raw, locator_map, base_url=urls[0] if urls else "", credentials=credentials, locators=locators)
+
+        if self._negative_tests:
+            neg_plans = self._generate_negative_plans(positive_plans, locators, urls)
+            positive_plans.extend(neg_plans)
+
+        return positive_plans
+
+    # ── Negative + boundary test generation ───────────────────────────
+
+    _NEGATIVE_SYSTEM = """You are a security-aware QA engineer generating NEGATIVE and BOUNDARY test cases.
+
+RULES:
+1. For each positive test that fills a form, generate ONE failure-path test using wrong/missing inputs.
+   - Wrong credentials → assert error message visible using the error_containers from context
+   - Missing required field → assert validation error visible
+   - Test ID: {positive_id}_neg
+2. For each positive test that fills a form, generate ONE boundary test with edge-case inputs:
+   - Use empty string for one required field
+   - Use a 256-character string for a text input
+   - Use value: <script>alert(1)</script> for a text input (XSS probe)
+   - Use value: ' OR 1=1-- for a text input (SQLi probe)
+   - Test ID: {positive_id}_boundary
+3. Assertions MUST check element_visible on an error container, NOT url navigation.
+   Use the exact error_containers selectors provided in the context.
+4. Use IDENTICAL selectors from the positive plan — never invent new ones.
+5. Output: JSON array only, same schema as positive plans. No markdown.
+"""
+
+    _NEGATIVE_PROMPT = """## Positive Plans (reuse their selectors exactly, flip inputs to invalid)
+{positive_plans_json}
+
+## Error Containers Available on This Site
+{error_containers}
+
+## Available Locators (for additional context)
+{locators_summary}
+
+Generate negative and boundary test cases. Output JSON array only — no markdown.
+"""
+
+    def _generate_negative_plans(self, positive_plans: list, locators: list, urls: list) -> list:
+        """
+        Generate negative (wrong-input) and boundary (edge-case) test plans from
+        the existing positive plans. One AI call for all plans combined.
+        """
+        if not self._ai or not positive_plans:
+            return []
+
+        # Only generate negatives for plans that have fill steps (form tests)
+        form_plans = [
+            p for p in positive_plans
+            if any(s.get("action") == "fill" for s in p.get("steps", []))
+            and "_planning_error" not in p
+        ]
+        if not form_plans:
+            return []
+
+        # Collect error containers from semantic context
+        error_containers: list = []
+        if self._db:
+            states = self._db.get_all_states() if hasattr(self._db, "get_all_states") else []
+            for state in states:
+                ctx = state.get("semantic_context") or {}
+                error_containers.extend(ctx.get("error_containers", []))
+            error_containers = list(dict.fromkeys(error_containers))[:10]  # dedupe, cap at 10
+
+        locators_summary = _format_locators(locators, max_items=40, group_by_url=True)
+
+        prompt = self._NEGATIVE_PROMPT.format(
+            positive_plans_json = json.dumps(form_plans, indent=2),
+            error_containers    = "\n".join(f"  - {e}" for e in error_containers) or "  (none detected — use role=alert or .error)",
+            locators_summary    = locators_summary,
+        )
+
+        try:
+            raw = self._ai.complete(prompt, system_prompt=self._NEGATIVE_SYSTEM, max_tokens=4096, temperature=0)
+        except Exception:
+            return []
+
+        try:
+            locator_map = {loc.get("id", ""): loc for loc in locators}
+            neg_plans = self._parse_plans(raw, locator_map, base_url=urls[0] if urls else "")
+            # Mark them so reports can distinguish positive vs negative
+            for p in neg_plans:
+                p.setdefault("_meta", {})["test_type"] = (
+                    "boundary" if p.get("test_id", "").endswith("_boundary") else "negative"
+                )
+            return neg_plans
+        except Exception:
+            return []
 
     def _validate_plan_with_small_model(self, plan: dict, locators: list) -> dict:
         """
@@ -590,6 +684,60 @@ class TestGenerator:
                 fixed.append(a)
 
         return {**plan, "assertions": fixed}
+
+    def _fix_malformed_selectors(self, plan: dict) -> dict:
+        """
+        Repair selectors where the model nested the value incorrectly.
+
+        LLaMA-family models sometimes generate:
+            {"strategy": "testid", "value": {"testid": "add-to-cart"}}
+        instead of:
+            {"strategy": "testid", "value": "add-to-cart"}
+
+        Only applies to strategies whose value MUST be a plain string.
+        Strategies that legitimately use a dict value (role, role_container)
+        are left untouched.
+        """
+        # These strategies always take a plain string value — never a dict.
+        _STRING_VALUE_STRATEGIES = frozenset({
+            "testid", "testid_prefix", "css", "text", "label",
+            "placeholder", "aria_label", "aria-label",
+        })
+
+        def _unwrap(sel: dict) -> dict:
+            if not isinstance(sel, dict):
+                return sel
+            strategy = sel.get("strategy", "")
+            value    = sel.get("value")
+            # Only touch strategies that must have a string value
+            if strategy not in _STRING_VALUE_STRATEGIES:
+                return sel
+            if not isinstance(value, dict):
+                return sel
+            # pattern: {"strategy":"testid","value":{"testid":"foo"}}
+            if strategy in value and isinstance(value[strategy], str):
+                sel = dict(sel)
+                sel["value"] = value[strategy]
+                return sel
+            # pattern: {"strategy":"testid","value":{"value":"foo"}}
+            if "value" in value and isinstance(value["value"], str) and "strategy" not in value:
+                sel = dict(sel)
+                sel["value"] = value["value"]
+                return sel
+            # pattern: fully nested selector {"strategy":X,"value":{"strategy":X,"value":"foo"}}
+            if "strategy" in value and "value" in value:
+                return _unwrap(value)
+            return sel
+
+        for step in plan.get("steps", []):
+            if "selector" in step:
+                step["selector"] = _unwrap(step["selector"])
+            if "fallback" in step:
+                step["fallback"] = _unwrap(step["fallback"])
+        for assertion in plan.get("assertions", []):
+            if "selector" in assertion:
+                assertion["selector"] = _unwrap(assertion["selector"])
+        return plan
 
     def _fix_selector_strategies(self, plans: list) -> list:
         """
@@ -947,6 +1095,7 @@ class TestGenerator:
 
         needs_cart = any(_is_cart_navigate(s) for s in steps)
         if not needs_cart:
+            plan["steps"] = steps  # persist Repair 0 changes even when cart repairs are not needed
             return plan
 
         # ── Repair 1: inject add-to-cart if missing ───────────────────────
@@ -1126,6 +1275,10 @@ class TestGenerator:
             except Exception as e:
                 # Even if one plan fails validation, we should try the rest
                 parsed_plans.append({"test_id": test_id, "_planning_error": str(e)})
+
+        # Normalize malformed selectors: LLaMA sometimes generates
+        # {"strategy":"testid","value":{"testid":"foo"}} instead of {"strategy":"testid","value":"foo"}
+        parsed_plans = [self._fix_malformed_selectors(p) for p in parsed_plans]
 
         # Fix testid selectors on plain-HTML sites (operates across all plans at once
         # so the has_testid check is evaluated once for the entire site).

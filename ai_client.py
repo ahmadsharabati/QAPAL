@@ -93,12 +93,48 @@ class AIClient:
                 XAI_API_KEY
 
         Optional:
-            QAPAL_AI_MODEL      — model name (provider default used if unset)
-            QAPAL_AI_BASE_URL   — custom OpenAI-compatible endpoint
+            QAPAL_AI_MODEL     — model name (provider default used if unset)
+            QAPAL_AI_BASE_URL  — custom OpenAI-compatible endpoint
         """
-        provider = os.getenv("QAPAL_AI_PROVIDER", "anthropic").lower().strip()
-        model    = os.getenv("QAPAL_AI_MODEL", "").strip() or None
-        base_url = os.getenv("QAPAL_AI_BASE_URL", "").strip() or None
+        return cls._build(
+            provider_var = "QAPAL_AI_PROVIDER",
+            model_var    = "QAPAL_AI_MODEL",
+            base_url_var = "QAPAL_AI_BASE_URL",
+        )
+
+    @classmethod
+    def small_from_env(cls) -> "AIClient":
+        """
+        Build a cheap/fast AIClient from QAPAL_AI_SMALL_* env vars.
+        Falls back to the main QAPAL_AI_* vars for any value not set.
+
+        Optional:
+            QAPAL_AI_SMALL_PROVIDER  — provider for the small model (defaults to QAPAL_AI_PROVIDER)
+            QAPAL_AI_SMALL_MODEL     — model name (defaults to provider built-in small)
+            QAPAL_AI_SMALL_BASE_URL  — base URL (defaults to QAPAL_AI_BASE_URL)
+        """
+        return cls._build(
+            provider_var     = "QAPAL_AI_SMALL_PROVIDER",
+            model_var        = "QAPAL_AI_SMALL_MODEL",
+            base_url_var     = "QAPAL_AI_SMALL_BASE_URL",
+            fallback_provider= os.getenv("QAPAL_AI_PROVIDER", "anthropic"),
+            fallback_base_url= os.getenv("QAPAL_AI_BASE_URL", ""),
+            use_small_default= True,
+        )
+
+    @classmethod
+    def _build(
+        cls,
+        provider_var:      str,
+        model_var:         str,
+        base_url_var:      str,
+        fallback_provider: str = "anthropic",
+        fallback_base_url: str = "",
+        use_small_default: bool = False,
+    ) -> "AIClient":
+        provider = (os.getenv(provider_var, "").strip() or fallback_provider).lower()
+        model    = os.getenv(model_var, "").strip() or None
+        base_url = (os.getenv(base_url_var, "").strip() or fallback_base_url) or None
 
         if provider == "anthropic":
             api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
@@ -107,10 +143,8 @@ class AIClient:
                     "ANTHROPIC_API_KEY is not set. "
                     "Add it to your .env file or environment."
                 )
-            return _AnthropicClient(
-                api_key = api_key,
-                model   = model or "claude-sonnet-4-6",
-            )
+            default = _AnthropicClient._SMALL_MODEL if use_small_default else "claude-sonnet-4-6"
+            return _AnthropicClient(api_key=api_key, model=model or default)
 
         if provider in ("openai", "grok", "xai"):
             if provider in ("grok", "xai"):
@@ -118,11 +152,14 @@ class AIClient:
                     os.getenv("XAI_API_KEY", "").strip()
                     or os.getenv("GROK_API_KEY", "").strip()
                 )
-                model    = model or "grok-2-latest"
                 base_url = base_url or "https://api.x.ai/v1"
+                default  = model or "grok-2-latest"
             else:
-                api_key  = os.getenv("OPENAI_API_KEY", "").strip()
-                model    = model or "gpt-4o-mini"
+                api_key = os.getenv("OPENAI_API_KEY", "").strip()
+                if use_small_default and not base_url:
+                    default = model or _OpenAIClient._SMALL_MODEL_OPENAI
+                else:
+                    default = model or "gpt-4o-mini"
 
             if not api_key and not base_url:
                 key_name = "XAI_API_KEY" if provider in ("grok", "xai") else "OPENAI_API_KEY"
@@ -133,12 +170,12 @@ class AIClient:
 
             return _OpenAIClient(
                 api_key  = api_key or "dummy",
-                model    = model,
+                model    = default,
                 base_url = base_url,
             )
 
         raise ValueError(
-            f"Unknown QAPAL_AI_PROVIDER: '{provider}'. "
+            f"Unknown provider: '{provider}'. "
             "Valid values: anthropic, openai, grok"
         )
 
