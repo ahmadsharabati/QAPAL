@@ -184,24 +184,35 @@ A11Y_JS = r"""
     var tag       = el.tagName.toLowerCase();
     var loc;
 
+    // Capture elements with a semantic id even when they have no accessible name.
+    // Skips auto-generated ids like "btn-42" or "react-1a2b".
+    var elemId = el.id || '';
+    var hasSemanticId = elemId && !/^(:r|react-|ng-|v-|[a-z]+-\d+$|\d)/.test(elemId);
+
     if (testid) {
       loc = { strategy: 'testid', value: testid };
     } else if (role && name) {
       loc = { strategy: 'role', value: { role: role, name: name } };
+    } else if (hasSemanticId && el.offsetWidth > 0 && el.offsetHeight > 0) {
+      loc = { strategy: 'id', value: elemId };
+      // Use the id itself as the accessible name so the AI can reference it
+      if (!name) name = elemId;
     } else {
       loc = { strategy: 'none', value: '', actionable: false };
     }
 
+    var isVisible = el.offsetWidth > 0 && el.offsetHeight > 0;
     results.push({
       role:       role,
       name:       name,
       tag:        tag,
       testid:     testid,
+      elemId:     hasSemanticId ? elemId : '',
       container:  container,
       domPath:    domPath,
       ariaLabel:  el.getAttribute('aria-label') || '',
       loc:        loc,
-      actionable: !!(testid || (role && name)) && el.offsetWidth > 0 && el.offsetHeight > 0,
+      actionable: !!(testid || (role && name) || (hasSemanticId && isVisible)) && isVisible,
     });
   }
   return results;

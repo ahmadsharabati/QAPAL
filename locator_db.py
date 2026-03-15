@@ -180,6 +180,14 @@ def _build_chain(element: dict, container: str) -> List[Dict[str, Any]]:
     if testid:
         chain.append({"strategy": "testid", "value": testid, "unique": True})
 
+    # id strategy: highest confidence after testid — comes before role so the
+    # executor tries the stable id first for unnamed-but-id'd elements (P0.4).
+    elem_id = element.get("elemId") or (
+        loc.get("value") if loc.get("strategy") == "id" else None
+    )
+    if elem_id and not testid:
+        chain.append({"strategy": "id", "value": elem_id, "unique": True})
+
     if role and role != "none" and name:
         chain.append({
             "strategy": "role",
@@ -205,8 +213,8 @@ def _build_chain(element: dict, container: str) -> List[Dict[str, Any]]:
     if placeholder:
         chain.append({"strategy": "placeholder", "value": placeholder, "unique": None})
 
-    if loc.get("strategy") in ("css", "id") and loc.get("value"):
-        chain.append({"strategy": loc["strategy"], "value": loc["value"], "unique": False})
+    if loc.get("strategy") == "css" and loc.get("value"):
+        chain.append({"strategy": "css", "value": loc["value"], "unique": False})
 
     return chain
 

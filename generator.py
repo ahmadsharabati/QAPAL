@@ -640,6 +640,78 @@ class TestGenerator:
 
         return plans
 
+    def _fix_role_mismatches(self, plans: list) -> list:
+        """
+        Post-processor (P0.3): validate role strategy selectors against the locator DB.
+
+        The AI sometimes generates the wrong ARIA role — e.g. role=button when the DB
+        has role=link for the same element name. This pass corrects any mismatch so the
+        executor's get_by_role() call matches the real DOM.
+
+        Runs unconditionally on all sites (unlike _fix_selector_strategies which only
+        applies to no-testid sites).
+        """
+        if not self._db:
+            return plans
+
+        from locator_db import _normalize_url
+
+        for plan in plans:
+            steps = plan.get("steps", [])
+            curr_url = ""
+            for step in steps:
+                if step.get("action") == "navigate":
+                    curr_url = step.get("url", curr_url)
+                sel = step.get("selector") or {}
+                if sel.get("strategy") == "role" and isinstance(sel.get("value"), dict):
+                    plan_role = sel["value"].get("role", "")
+                    plan_name = sel["value"].get("name", "")
+                    if plan_role and plan_name and curr_url:
+                        db_match = self._find_by_name_in_db(plan_name, curr_url)
+                        if db_match and db_match["role"] != plan_role:
+                            sel["value"]["role"] = db_match["role"]
+                            sel["_role_corrected"] = True
+
+        return plans
+
+    def _find_by_name_in_db(self, name: str, url: str) -> Optional[dict]:
+        """
+        Find a locator DB entry whose accessible name fuzzy-matches `name`
+        scoped to `url`. Returns {role, name} or None.
+
+        Match strategy (in priority order):
+          1. Exact name match (case-insensitive)
+          2. DB name starts with plan name (handles "Add to Cart" vs "Add to cart")
+          3. Plan name starts with DB name (handles "Sign in" vs "Sign in to account")
+        """
+        if not self._db or not url:
+            return None
+
+        from locator_db import _normalize_url
+        norm_url = _normalize_url(url)
+        name_lc  = name.strip().lower()
+        if not name_lc:
+            return None
+
+        exact   = None
+        partial = None
+        for loc in self._db._locs.all():
+            if _normalize_url(loc.get("url", "")) != norm_url:
+                continue
+            ident    = loc.get("identity", {})
+            db_role  = ident.get("role", "")
+            db_name  = ident.get("name", "").strip().lower()
+            if not db_role or not db_name:
+                continue
+            if db_name == name_lc:
+                exact = {"role": db_role, "name": ident.get("name", "")}
+                break
+            if exact is None and partial is None:
+                if db_name.startswith(name_lc) or name_lc.startswith(db_name):
+                    partial = {"role": db_role, "name": ident.get("name", "")}
+
+        return exact or partial
+
     def _find_best_role_selector(self, sel: dict, url: str) -> Optional[dict]:
         """
         Search the locator DB for the best role-based selector matching the given
@@ -1058,6 +1130,10 @@ class TestGenerator:
         # Fix testid selectors on plain-HTML sites (operates across all plans at once
         # so the has_testid check is evaluated once for the entire site).
         parsed_plans = self._fix_selector_strategies(parsed_plans)
+
+        # Fix role mismatches — correct role=button when DB has role=link, etc.
+        # Runs on all sites unconditionally.
+        parsed_plans = self._fix_role_mismatches(parsed_plans)
 
         # Small-model validation pass: one cheap call per plan to fix any remaining
         # selector mismatches that rule-based post-processors couldn't catch.
