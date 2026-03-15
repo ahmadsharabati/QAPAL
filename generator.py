@@ -601,6 +601,61 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
 
         return {**plan, "assertions": fixed}
 
+    def _simulate_final_url(self, steps: list) -> str:
+        """
+        Walk the step list and simulate URL state through navigate + click transitions
+        using the nav graph. Returns the best-guess final URL after all steps complete.
+        Falls back to the last navigate URL when no nav graph transition matches a click.
+        """
+        from locator_db import _normalize_url
+
+        if self._state_graph is None:
+            for s in reversed(steps):
+                if s.get("action") == "navigate":
+                    return s.get("url", "")
+            return ""
+
+        transitions = self._state_graph.all_transitions()
+        current_url = ""
+
+        for step in steps:
+            action = step.get("action", "")
+            if action == "navigate":
+                current_url = step.get("url", current_url)
+            elif action == "click" and current_url:
+                sel = step.get("selector", {})
+                val = sel.get("value", "")
+                if sel.get("strategy") in ("testid", "testid_prefix"):
+                    click_label = str(val)
+                elif isinstance(val, dict):
+                    click_label = str(val.get("name", "") or val.get("role", ""))
+                elif not val and sel.get("name"):
+                    click_label = str(sel.get("name", ""))
+                else:
+                    click_label = str(val)
+                click_prefix = self._strip_dynamic_id(click_label)
+                norm_cur = _normalize_url(current_url)
+
+                def _tsv(t):
+                    return str((t.get("trigger", {}).get("selector") or {}).get("value", ""))
+
+                matches = [
+                    t for t in transitions
+                    if norm_cur in t.get("from_url", "")
+                    and (
+                        click_label in t.get("trigger", {}).get("label", "")
+                        or click_label == _tsv(t)
+                        or (click_prefix != click_label and (
+                            click_prefix in t.get("trigger", {}).get("label", "")
+                            or click_prefix in _tsv(t)
+                        ))
+                    )
+                ]
+                if matches:
+                    current_url = max(matches, key=lambda t: t["traversal_count"])["to_url"]
+
+        return current_url
+
     def _fix_element_assertions(self, plan: dict) -> dict:
         """
         Post-processor: validate element_visible / element_exists assertions against
@@ -616,32 +671,36 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
         if not self._db:
             return plan
 
+        from urllib.parse import urlparse
+        from locator_db import _normalize_url
+
         assertions = plan.get("assertions", [])
         steps      = plan.get("steps", [])
 
-        # Determine the expected page URL from the last navigate step
-        last_url = ""
-        for s in steps:
-            if s.get("action") == "navigate":
-                last_url = s.get("url", last_url)
-        page_path = ""
-        if last_url:
-            from urllib.parse import urlparse
-            page_path = self._strip_dynamic_id(urlparse(last_url).path)
+        # Simulate URL state through all steps (navigate + click nav-graph transitions)
+        # so we use the final page URL, not just the last navigate URL.
+        final_url = self._simulate_final_url(steps)
+        page_path = self._strip_dynamic_id(urlparse(final_url).path) if final_url else ""
 
-        # Build a set of known (role, name) pairs from the locator DB for this page
+        # Build a set of known (role, name) pairs from the locator DB for the final page.
+        # Also include all locators when the final URL is a dynamic product page —
+        # those pages share structure with other crawled pages.
         known_role_names: set = set()
-        if last_url:
-            from locator_db import _normalize_url
-            norm = _normalize_url(last_url)
+        if final_url:
+            norm = _normalize_url(final_url)
+            final_path_prefix = self._strip_dynamic_id(urlparse(final_url).path)
             for loc in self._db._locs.all():
-                if _normalize_url(loc.get("url", "")) != norm:
-                    continue
-                ident = loc.get("identity", {})
-                role  = ident.get("role", "").lower()
-                name  = ident.get("name", "").lower()
-                if role:
-                    known_role_names.add((role, name))
+                loc_url = loc.get("url", "")
+                loc_path = self._strip_dynamic_id(urlparse(loc_url).path) if loc_url else ""
+                # Match exact URL OR same dynamic path prefix (e.g. /product/ matches any product page)
+                if _normalize_url(loc_url) == norm or (
+                    final_path_prefix and loc_path == final_path_prefix
+                ):
+                    ident = loc.get("identity", {})
+                    role  = ident.get("role", "").lower()
+                    name  = ident.get("name", "").lower()
+                    if role:
+                        known_role_names.add((role, name))
 
         fixed = []
         for a in assertions:
