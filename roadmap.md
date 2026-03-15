@@ -1,5 +1,5 @@
 # QAPAL Roadmap
-## Pending Features: Priority P0 → P5
+## Pending Features: Priority P1 → P5
 
 Current state: **5/5 on practicesoftwaretesting.com, 5/5 on books.toscrape.com, 5/5 on automationexercise.com.**
 
@@ -40,16 +40,15 @@ Current state: **5/5 on practicesoftwaretesting.com, 5/5 on books.toscrape.com, 
 | 1 | ✅ ~~P0~~ | `generator.py` | ~~Wrong ARIA role~~ — fixed in 13bfc00 |
 | 2 | ✅ ~~P0~~ | `crawler.py` + `locator_db.py` | ~~Unnamed buttons missing from DB~~ — fixed in 13bfc00 |
 | 3 | 🔴 **P1** | `executor.py` | **Passive error interception** — console errors, network failures, JS exceptions on every run |
-| 4 | 🔴 **P1** | `executor.py` + `main.py` | **Visual regression baseline + diff** — screenshot per assertion, pixel-diff on re-runs |
+| 4 | 🔴 **P1** | `executor.py` + `main.py` | **Visual regression baseline + diff** — screenshot per page/navigation, pixel-diff on re-runs |
 | 5 | 🟡 P1 | `locator_db.py` + `state_graph.py` + `crawler.py` | DOM Template Fingerprinting — skip re-crawling structurally identical pages |
-| 6 | 🟡 P1 | `executor.py` | Small model for AI rediscovery path (`QAPAL_AI_REDISCOVERY`) |
+| 6 | ✅ ~~P1~~ | `executor.py` | ~~Small model for AI rediscovery~~ — `model_override=small_model` wired in `_ai_rediscover()` |
 | 7 | 🟢 **P2** | `generator.py` + `main.py` | **Negative test generation** — failure-path + boundary/edge-case tests from existing PRD |
 | 8 | 🟢 P2 | `action_miner.py` + `site_compiler.py` + `generator.py` + `main.py` | Compiled Site Model & UI Action Mining Engine — 90% token reduction, reusable actions |
 | 9 | 🟢 P3 | `crawler.py` + `main.py` | Wire `classify_page_change()` into graph-crawl to tag edges with `page_change_type` |
 | 10 | 🟢 P3 | `crawler.py` | No-revisit enforcement — use `has_state()` in BFS instead of in-memory set |
 | 11 | 🔵 P4 | `crawler.py` + `state_graph.py` | Screenshot per page node during crawl → `reports/states/<state_id>.png` |
-| 12 | ⬜ P5 | `main.py` + `executor.py` | Structured JSON run report |
-| 13 | ⬜ P5 | `executor.py` | Concurrent test execution (`--parallel N`) |
+| 12 | ⬜ P5 | `executor.py` | Concurrent test execution (`--parallel N`) |
 
 ---
 
@@ -173,6 +172,33 @@ def _compute_template_hash(elements: list[dict]) -> str:
 }
 ```
 
+#### `_url_to_pattern()` — URL Generalization
+
+Converts a concrete URL to a pattern by replacing dynamic path segments with `:id`:
+
+```python
+import re
+
+_DYNAMIC_SEGMENT = re.compile(
+    r"(?<=/)"                     # after a slash
+    r"(?:"
+        r"[a-f0-9]{8,}"          # hex IDs (UUIDs, mongo IDs)
+        r"|[a-zA-Z0-9_-]*\d{2,}" # slugs with numeric suffix (e.g. tipping-the-velvet_999)
+        r"|\d+"                   # pure numeric segments
+    r")"
+    r"(?=/|$)"                    # before next slash or end
+)
+
+def _url_to_pattern(url: str) -> str:
+    """
+    https://books.toscrape.com/catalogue/a-light-in-the-attic_1000/index.html
+    → https://books.toscrape.com/catalogue/:id/index.html
+    """
+    return _DYNAMIC_SEGMENT.sub(":id", url)
+```
+
+Heuristic: any path segment that is purely numeric, contains a hex string (8+ chars), or ends with a numeric suffix (2+ digits) is treated as dynamic. This covers the common patterns (product IDs, UUIDs, slug-with-number) without over-generalizing.
+
 #### Crawl Skip Logic
 
 **In `crawler.py` `crawl_page()`**, after element extraction, before storing to DB:
@@ -206,7 +232,20 @@ def record_template_match(self, template_id: str, url: str) -> None: ...
 
 ```python
 def inherit_locators(self, source_url: str, target_url: str) -> int:
-    """Copy all locator records from source_url to target_url. Returns count."""
+    """Copy all locator records from source_url to target_url. Returns count.
+    Each inherited record gets a 'template_id' field for cascade tracking."""
+```
+
+**Staleness handling:** When the sample URL is re-crawled (e.g., stale-check triggers after 60 minutes), all inherited records sharing the same `template_id` must be refreshed. The `inherit_locators` method tags each copied record with `template_id` so that `re_crawl()` can cascade-update all inherited copies:
+
+```python
+# In crawl_page(), when re-crawling a known sample_url:
+if is_recrawl and state_graph:
+    template = state_graph.get_template_by_sample_url(url)
+    if template:
+        inherited_urls = state_graph.get_inherited_urls(template["template_id"])
+        for target_url in inherited_urls:
+            db.inherit_locators(source_url=url, target_url=target_url)
 ```
 
 ### Files Affected
@@ -224,13 +263,11 @@ def inherit_locators(self, source_url: str, target_url: str) -> int:
 
 ---
 
-## 🟡 P1 — Small Model in Executor Rediscovery
+## ✅ Shipped — Small Model in Executor Rediscovery
 
-**File:** `executor.py`
+**File:** `executor.py` — `_ai_rediscover()`
 
-The AI rediscovery path (`QAPAL_AI_REDISCOVERY`) currently uses the same large model as generation. `model_override` is already implemented in `ai_client.py` — the executor just needs to pass `model_override=self._ai.small_model` to the existing `ai_client.complete()` call in the rediscovery code path.
-
-**Token cost reduction:** ~90% cheaper per recovery call.
+The `acomplete()` call now passes `model_override=ai_client.small_model` (Haiku for Anthropic). ~90% cheaper per recovery call.
 
 ---
 
@@ -256,9 +293,12 @@ page.on("requestfailed", lambda req: _network_failures.append({"url": req.url, "
 page.on("pageerror",     lambda err: _js_exceptions.append(str(err)))
 ```
 
-**Noise filter** — skip CDN assets, analytics, fonts, static files:
+**Noise filter** — skip CDN assets, analytics, fonts, static files. User-extensible via `QAPAL_NOISE_DOMAINS`:
 ```python
-_NOISE_DOMAINS = ("google-analytics.com", "doubleclick.net", "fonts.googleapis.com", "sentry.io")
+_DEFAULT_NOISE_DOMAINS = ("google-analytics.com", "doubleclick.net", "fonts.googleapis.com", "sentry.io")
+_NOISE_DOMAINS = _DEFAULT_NOISE_DOMAINS + tuple(
+    d.strip() for d in os.getenv("QAPAL_NOISE_DOMAINS", "").split(",") if d.strip()
+)
 _NOISE_EXTS    = (".png", ".jpg", ".gif", ".woff", ".woff2", ".svg", ".ico", ".css")
 
 def _is_signal_failure(url: str, base_url: str) -> bool:
@@ -304,20 +344,29 @@ QAPAL_VISUAL_THRESHOLD=0.02     # 2% pixel diff tolerance
 **Baseline directory structure:**
 ```
 reports/
-  baseline/<test_id>/assertion_0.png, assertion_1.png, ...
-  visual_diff/<test_id>_<ts>/assertion_0_diff.png  ← red pixels = regressions
+  baseline/<test_id>/step_3.png, step_7.png, ...   ← one per page/navigation
+  visual_diff/<test_id>_<ts>/step_3_diff.png        ← red pixels = regressions
 ```
 
-**In `_run_assertion()`** — after each assertion, if `QAPAL_VISUAL_REGRESSION=true`:
+**Per-page screenshots** — taken after every `navigate` action and after any `click` that triggers a URL change. This catches broken layouts on every page the test visits, not just at assertion points:
+
 ```python
-async def _compare_visual(page, test_id, i) -> dict | None:
+# In the step loop, after executing a step:
+if VISUAL_REGRESSION and (step["action"] == "navigate" or url_changed):
+    vr = await _compare_visual(page, tc_id, step_index)
+    if vr:
+        visual_regressions.append(vr)
+```
+
+```python
+async def _compare_visual(page, test_id, step_index) -> dict | None:
     from PIL import Image, ImageChops
-    baseline = SCREENSHOT_DIR / "baseline" / test_id / f"assertion_{i}.png"
+    baseline = SCREENSHOT_DIR / "baseline" / test_id / f"step_{step_index}.png"
     if not baseline.exists():
         baseline.parent.mkdir(parents=True, exist_ok=True)
         await page.screenshot(path=str(baseline), full_page=False)
         return None  # first run — save baseline, no diff
-    current = SCREENSHOT_DIR / "visual_diff" / f"{test_id}_{_ts()}" / f"assertion_{i}.png"
+    current = SCREENSHOT_DIR / "visual_diff" / f"{test_id}_{_ts()}" / f"step_{step_index}.png"
     current.parent.mkdir(parents=True, exist_ok=True)
     await page.screenshot(path=str(current), full_page=False)
     img_a = Image.open(baseline).convert("RGB")
@@ -325,12 +374,12 @@ async def _compare_visual(page, test_id, i) -> dict | None:
     diff  = ImageChops.difference(img_a, img_b)
     diff_pct = sum(1 for r,g,b in diff.getdata() if r+g+b > 30) / (img_a.width * img_a.height)
     if diff_pct > VISUAL_THRESHOLD:
-        return {"assertion_index": i, "diff_pct": round(diff_pct, 4),
+        return {"step_index": step_index, "diff_pct": round(diff_pct, 4),
                 "baseline": str(baseline), "current": str(current)}
     return None
 ```
 
-Add `visual_regressions` list to result; `main.py` prints "VISUAL REGRESSIONS" warning section.
+Add `visual_regressions` list to result; `main.py` prints "VISUAL REGRESSIONS" warning section. Regressions are warnings — they do **not** flip `passed`.
 
 **CLI:** `--update-baseline` flag in `prd-run` / `run` deletes existing baseline for affected tests.
 
@@ -418,7 +467,7 @@ Crawler → locator_db + state_graph
 
 ### Dependency
 
-Soft dependency on **P1 DOM Template Fingerprinting** — fingerprinting produces clean `url_pattern` groupings that the compiler uses to deduplicate states. Can be implemented without it but will produce noisier state groupings.
+**Practical dependency on P1 DOM Template Fingerprinting.** The `action_miner._group_by_url_pattern()` method needs URL patterns to cluster locators by page type. P1's template fingerprinting produces these patterns via `_url_to_pattern()`. Without P1, the miner would need a fallback (e.g., grouping by URL path prefix), which produces noisier and less accurate state groupings. **Recommended: implement P1 first.**
 
 ---
 
@@ -680,16 +729,11 @@ During crawl, after `crawl_page()`, save `page.screenshot(path=f"reports/states/
 
 ## ⬜ P5 — Nice to Have
 
-### P5.1 — Structured JSON Run Report
-After each `run` / `prd-run`, write `reports/run_<timestamp>.json`:
-- Per-test: pass/fail, duration, assertion results, screenshot path on failure
-- Summary: total/pass/fail counts, run duration
+### P5.1 — Concurrent Test Execution
+Add `--parallel N` flag. Use `asyncio.gather()` to run N plans simultaneously, each in its own browser context. Note: TinyDB is not thread-safe — parallel runs that trigger AI rediscovery will need either a lock or a per-context DB.
 
-### P5.2 — Concurrent Test Execution
-Add `--parallel N` flag. Use `asyncio.gather()` to run N plans simultaneously, each in its own browser context.
-
-### P5.3 — Visual Regression Baseline
-After a passing run, save a screenshot per assertion step as a baseline. On re-run, compare with pixel diff threshold. Visual regressions flagged in report but do not block a functional pass.
+> **Removed:** P5.1 (Structured JSON Run Report) — already implemented in `main.py`.
+> **Removed:** P5.3 (Visual Regression Baseline) — promoted to P1 #4 with full design.
 
 ---
 
@@ -697,12 +741,12 @@ After a passing run, save a screenshot per assertion step as a baseline. On re-r
 
 | File | Changes |
 |------|---------|
-| `generator.py` | P0.3: role mismatch correction in `_fix_selector_strategies`; P2: compiled model prompt integration |
-| `crawler.py` | P0.4: capture unnamed buttons with semantic id; P1: template check in `crawl_page`; P3: `has_state` in BFS; P4: screenshot |
-| `locator_db.py` | P0.4: `id` strategy in locator chain; P1: `_compute_template_hash`, `_strip_nth`, `inherit_locators` |
+| `executor.py` | P1: passive error interception + visual regression per-page screenshots; P5: `--parallel` |
+| `main.py` | P1: visual regression summary output; P2: `compile` CLI command + auto-detect in `prd-run`; P3: `classify_page_change` in graph-crawl |
+| `generator.py` | P2: compiled model prompt integration; P2: negative test generation |
+| `crawler.py` | P1: template check in `crawl_page`; P3: `has_state` in BFS; P4: screenshot |
+| `locator_db.py` | P1: `_compute_template_hash`, `_strip_nth`, `inherit_locators` |
 | `state_graph.py` | P1: `page_templates` table + 3 methods; P4: screenshot in `enrich_and_add` |
-| `executor.py` | P1: `model_override` in AI rediscovery; P5.2: `--parallel`; P5.3: visual baseline |
-| `main.py` | P2: `compile` CLI command + auto-detect in `prd-run`; P3: `classify_page_change` in graph-crawl; P5.1: run report write |
 | `action_miner.py` | **new** — P2: UI Action Mining Engine |
 | `site_compiler.py` | **new** — P2: Site Compiler |
 | `compiled_model.json` | **new artifact** — P2: output of compile command |
