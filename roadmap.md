@@ -14,7 +14,8 @@ Current state: **5/5 on practicesoftwaretesting.com, 5/5 on books.toscrape.com, 
 | `generator.py` | `_fix_element_assertions`: validate role+name assertions against DB, replace hallucinations | b97f425 |
 | `generator.py` | `_fix_url_assertions`: guard against empty `url_contains` value (P0.1) | b97f425 |
 | `generator.py` | Prefix threshold raised 6→8 chars in `_fix_element_assertions` to prevent false positives (#4) | d88e8a0 |
-| `generator.py` | `_fix_url_assertions` button-click fix: button role with no nav graph match resolves to current URL | d88e8a0 |
+| `generator.py` | 
+`_fix_url_assertions` button-click fix: button role with no nav graph match resolves to current URL | d88e8a0 |
 | `executor.py` | `element_count`: unknown operator now returns assertion fail instead of silent equality fallback (#9) | d88e8a0 |
 | `executor.py` | `element_has_class`: reads `value` key correctly (was always `None` via `a.get("class")`) (#11) | d88e8a0 |
 | `executor.py` | `wait` action: all timeout defaults use `ACTION_TIMEOUT` env var instead of hardcoded 30s (#8) | d88e8a0 |
@@ -26,6 +27,9 @@ Current state: **5/5 on practicesoftwaretesting.com, 5/5 on books.toscrape.com, 
 | `ai_client.py` | `model_override` param on `complete()` / `acomplete()` for small-model calls | earlier |
 | `state_graph.py` | `format_for_prompt()`: filters navigate-action noise, uses prefix URL matching, caps at 12 paths | earlier |
 | `main.py` | PRD slug prefix for plan filenames (`bookshop-TC001_*`, `toolbox-TC001_*`) — no overwriting | earlier |
+| `generator.py` | `_fix_role_mismatches()`: corrects wrong ARIA role in role-strategy selectors against DB (P0.3) | 13bfc00 |
+| `crawler.py` | A11Y_JS captures unnamed buttons with semantic `id` (e.g. `#submit_search`) (P0.4) | 13bfc00 |
+| `locator_db.py` | `_build_chain()`: `id` strategy placed before `role+name`; `elemId` field wired through (P0.4) | 13bfc00 |
 
 ---
 
@@ -33,8 +37,8 @@ Current state: **5/5 on practicesoftwaretesting.com, 5/5 on books.toscrape.com, 
 
 | # | Priority | Area | What |
 |---|----------|------|------|
-| 1 | 🔴 P0 | `generator.py` | Wrong ARIA role in selectors not corrected (`role=button` when DB has `role=link`) |
-| 2 | 🔴 P0 | `crawler.py` + `locator_db.py` | Unnamed buttons missing from DB (no accessible name, no testid → never stored) |
+| 1 | ✅ ~~P0~~ | `generator.py` | ~~Wrong ARIA role~~ — fixed in 13bfc00 |
+| 2 | ✅ ~~P0~~ | `crawler.py` + `locator_db.py` | ~~Unnamed buttons missing from DB~~ — fixed in 13bfc00 |
 | 3 | 🟡 P1 | `locator_db.py` + `state_graph.py` + `crawler.py` | DOM Template Fingerprinting — skip re-crawling structurally identical pages |
 | 4 | 🟡 P1 | `executor.py` | Small model for AI rediscovery path (`QAPAL_AI_REDISCOVERY`) |
 | 5 | 🟢 P2 | `action_miner.py` + `site_compiler.py` + `generator.py` + `main.py` | **Compiled Site Model & UI Action Mining Engine** — 90% token reduction, reusable actions |
