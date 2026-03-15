@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
-from locator_db import LocatorDB, _make_id, _normalize_url
+from locator_db import LocatorDB, _make_id, _normalize_url, _compute_template_hash, _url_to_pattern
 
 try:
     from dotenv import load_dotenv
@@ -458,10 +458,11 @@ async def _run_login(page: Page, credentials: dict):
 # ── Core crawl ────────────────────────────────────────────────────────
 
 async def crawl_page(
-    page:  Page,
-    url:   str,
-    db:    LocatorDB,
-    force: bool = False,
+    page:        Page,
+    url:         str,
+    db:          LocatorDB,
+    force:       bool = False,
+    state_graph=None,
 ) -> dict:
     """
     Crawl a single page and update the locator DB.
@@ -572,12 +573,62 @@ async def crawl_page(
             if doc.get("warnings"):
                 all_warnings.extend(doc["warnings"])
 
+    # ── Template fingerprinting: skip re-crawl if layout already known ──
+    if state_graph is not None:
+        stored_docs   = db.get_all(url, valid_only=True)
+        template_hash = _compute_template_hash(stored_docs)
+        existing_tmpl = state_graph.get_template(template_hash)
+
+        if existing_tmpl and existing_tmpl["sample_url"] != url:
+            # Page matches a known template and is NOT the original sample URL.
+            # Inherit locators from the sample and skip full crawl bookkeeping.
+            state_graph.record_template_match(template_hash, url)
+            inherited = db.inherit_locators(
+                source_url=existing_tmpl["sample_url"],
+                target_url=url,
+                template_id=template_hash,
+            )
+            db.upsert_page(url, len(all_elements))
+            return {
+                "url":            url,
+                "crawled":        True,
+                "elements":       len(all_elements),
+                "new":            inherited,
+                "updated":        0,
+                "invalid":        0,
+                "warnings":       list(dict.fromkeys(all_warnings)),
+                "template_match": True,
+                "template_id":    template_hash,
+                "inherited_from": existing_tmpl["sample_url"],
+            }
+        else:
+            # New structural layout (or re-crawl of the sample URL itself) —
+            # register_template is a no-op if template_id already exists.
+            state_graph.register_template(
+                template_id=template_hash,
+                url=url,
+                elements=stored_docs,
+                url_pattern=_url_to_pattern(url),
+            )
+
     db.soft_decay(url, seen_ids)
     invalidated = len([
         d for d in db.get_all(url, valid_only=False)
         if not d.get("history", {}).get("valid", True)
     ])
     db.upsert_page(url, len(all_elements))
+
+    # Cascade-refresh: if this URL is a known sample_url, push updated locators
+    # to all pages that previously inherited from it.
+    if state_graph is not None:
+        tmpl = state_graph.get_template_by_sample_url(url)
+        if tmpl:
+            for target_url in state_graph.get_inherited_urls(tmpl["template_id"]):
+                db.inherit_locators(
+                    source_url=url,
+                    target_url=target_url,
+                    template_id=tmpl["template_id"],
+                )
 
     return {
         "url":      url,
@@ -606,15 +657,17 @@ class Crawler:
 
     def __init__(
         self,
-        db:          LocatorDB,
-        headless:    Optional[bool] = None,
-        credentials: Optional[dict] = None,
+        db:           LocatorDB,
+        headless:     Optional[bool] = None,
+        credentials:  Optional[dict] = None,
+        state_graph=None,
     ):
         self._db          = db
         self._headless    = headless if headless is not None else (
             os.getenv("QAPAL_HEADLESS", "true").lower() == "true"
         )
         self._credentials = credentials
+        self._state_graph = state_graph
         self._pw          = None
         self._browser     = None
         self._started     = False
@@ -652,7 +705,8 @@ class Crawler:
         Called by executor on every navigation.
         Does NOT wait for stable — executor already did that.
         """
-        return await crawl_page(page=page, url=_normalize_url(url), db=self._db, force=force)
+        return await crawl_page(page=page, url=_normalize_url(url), db=self._db, force=force,
+                                state_graph=self._state_graph)
 
     async def crawl_url(self, url: str, force: bool = False) -> dict:
         """Crawl a single URL in an isolated context."""
@@ -663,7 +717,8 @@ class Crawler:
         try:
             await page.goto(url, wait_until="domcontentloaded")
             await wait_for_stable(page)
-            return await crawl_page(page, _normalize_url(url), self._db, force=force)
+            return await crawl_page(page, _normalize_url(url), self._db, force=force,
+                                    state_graph=self._state_graph)
         finally:
             await ctx.close()
 
@@ -693,7 +748,8 @@ class Crawler:
                     await page.goto(url, wait_until="domcontentloaded")
                     await wait_for_stable(page)
                     async with db_lock:
-                        result = await crawl_page(page, _normalize_url(url), self._db, force=force)
+                        result = await crawl_page(page, _normalize_url(url), self._db, force=force,
+                                                  state_graph=self._state_graph)
                 except Exception as e:
                     result = {
                         "url": _normalize_url(url), "crawled": False,

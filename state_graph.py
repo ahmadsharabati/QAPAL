@@ -152,10 +152,11 @@ class StateGraph:
         db: LocatorDB instance.  We use db._db, db._lock, db._Q directly
         to stay within the same TinyDB connection and lock.
         """
-        self._db     = db
-        self._table  = db._db.table("transitions")
-        self._states = db._db.table("page_states")  # per-page semantic state nodes
-        self._Q      = db._Q
+        self._db        = db
+        self._table     = db._db.table("transitions")
+        self._states    = db._db.table("page_states")    # per-page semantic state nodes
+        self._templates = db._db.table("page_templates") # DOM template fingerprints
+        self._Q         = db._Q
 
     # ── State nodes ────────────────────────────────────────────────────
 
@@ -206,6 +207,70 @@ class StateGraph:
         """Return all known page state nodes."""
         with self._db._lock:
             return self._states.all()
+
+    # ── Template fingerprinting ────────────────────────────────────────
+
+    def get_template(self, template_id: str) -> Optional[dict]:
+        """Return the page_templates record for a given template_id, or None."""
+        with self._db._lock:
+            return self._templates.get(self._Q.template_id == template_id)
+
+    def get_template_by_sample_url(self, sample_url: str) -> Optional[dict]:
+        """Return the template record whose sample_url matches, or None."""
+        with self._db._lock:
+            return self._templates.get(self._Q.sample_url == sample_url)
+
+    def get_inherited_urls(self, template_id: str) -> List[str]:
+        """Return all URLs that were populated by inheriting from this template."""
+        with self._db._lock:
+            records = self._templates.search(self._Q.template_id == template_id)
+            if not records:
+                return []
+            return records[0].get("inherited_urls", [])
+
+    def register_template(
+        self,
+        template_id: str,
+        url:         str,
+        elements:    list,
+        url_pattern: str = "",
+    ) -> None:
+        """
+        Register a new DOM template. No-op if template_id already exists —
+        the first-crawled page wins as sample_url.
+        """
+        with self._db._lock:
+            if self._templates.get(self._Q.template_id == template_id):
+                return
+            self._templates.insert({
+                "template_id":    template_id,
+                "url_pattern":    url_pattern,
+                "sample_url":     url,
+                "element_count":  len(elements),
+                "first_seen":     _now(),
+                "match_count":    0,
+                "inherited_urls": [],
+            })
+
+    def record_template_match(self, template_id: str, url: str) -> None:
+        """
+        Record that url matched an existing template (full crawl skipped).
+        Increments match_count and appends url to inherited_urls.
+        """
+        with self._db._lock:
+            existing = self._templates.get(self._Q.template_id == template_id)
+            if not existing:
+                return
+            inherited = existing.get("inherited_urls", [])
+            if url not in inherited:
+                inherited = inherited + [url]
+            self._templates.update(
+                {
+                    "match_count":    existing.get("match_count", 0) + 1,
+                    "inherited_urls": inherited,
+                },
+                self._Q.template_id == template_id,
+            )
 
     # ── Write ─────────────────────────────────────────────────────────
 

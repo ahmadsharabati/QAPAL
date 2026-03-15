@@ -21,6 +21,7 @@ Install:
 """
 
 import hashlib
+import json
 import os
 import re
 import threading
@@ -78,6 +79,7 @@ _DYNAMIC_PATH_SEG_RE = re.compile(
     r"(?<=/)"
     r"(?:[0-9A-Za-z]{26}"                                          # ULID (26-char base32)
     r"|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"  # UUID
+    r"|[a-zA-Z0-9_-]*\d{2,}"                                      # slug-with-number (e.g. tipping-the-velvet_999)
     r"|\d{4,}"                                                     # numeric IDs ≥4 digits
     r")(?=/|$)"
 )
@@ -98,6 +100,40 @@ def _url_to_pattern(url: str) -> str:
         return p
     parsed = urlparse(p)
     return urlunparse((parsed.scheme, parsed.netloc, normalized_path, "", "", ""))
+
+
+# ── Template fingerprinting helpers ──────────────────────────────────
+
+_NTH_RE = re.compile(r":nth\(\d+\)")
+
+
+def _strip_nth(dom_path: str) -> str:
+    """
+    Strip positional :nth(N) indices from a dom_path.
+    e.g. 'article>div:nth(2)>form>button' → 'article>div>form>button'
+    """
+    return _NTH_RE.sub("", dom_path)
+
+
+def _compute_template_hash(elements: list) -> str:
+    """
+    Structural fingerprint from a list of locator DB documents.
+    Uses role + container tag (stripped of attrs) + dom_path (without :nth indices).
+    Keys are deduplicated — presence of a slot type matters, not repetition count.
+    This makes pages with 1 vs 2 related-product links hash identically.
+    Ignores element names — purely structural.
+    Returns a 12-char hex string.
+    """
+    structural_keys = sorted(set(
+        (
+            elem.get("identity", {}).get("role", ""),
+            elem.get("identity", {}).get("container", "").split("[")[0].split("#")[0],
+            _strip_nth(elem.get("identity", {}).get("dom_path", "")),
+        )
+        for elem in elements
+        if elem.get("locators", {}).get("actionable", False)
+    ))
+    return hashlib.sha256(json.dumps(structural_keys).encode()).hexdigest()[:12]
 
 
 # ── Dynamic name normalization ────────────────────────────────────────
@@ -650,3 +686,59 @@ class LocatorDB:
             self._sessions.truncate()
             self._states.truncate()
             return {"locators": n_locs, "pages": n_pages, "sessions": n_sess, "states": n_states}
+
+    def inherit_locators(self, source_url: str, target_url: str, template_id: str = "") -> int:
+        """
+        Copy all valid locator records from source_url to target_url.
+        Each copied record is tagged with template_id for cascade-refresh tracking.
+        Skips records that already exist for target_url.
+        Returns the number of new records inserted.
+        """
+        source_url = _normalize_url(source_url)
+        target_url = _normalize_url(target_url)
+        if source_url == target_url:
+            return 0
+
+        source_docs = self.get_all(source_url, valid_only=True)
+        copied = 0
+        now = _now()
+
+        with self._lock:
+            for doc in source_docs:
+                identity  = doc.get("identity", {})
+                role      = identity.get("role", "")
+                name      = identity.get("name", "")
+                container = identity.get("container", "")
+                frame_url = identity.get("frame", {}).get("url", "main")
+                dom_path  = identity.get("dom_path", "")
+                new_id    = _make_id(target_url, role, name, container, frame_url, dom_path)
+
+                if self._locs.get(self._Q.id == new_id):
+                    continue  # already present — skip
+
+                new_doc = {
+                    "id":      new_id,
+                    "url":     target_url,
+                    "identity": {
+                        **identity,
+                        "frame": {
+                            **identity.get("frame", {}),
+                            "url": target_url if frame_url == source_url else frame_url,
+                        },
+                    },
+                    "locators": doc.get("locators", {}),
+                    "history": {
+                        "first_seen": now,
+                        "last_seen":  now,
+                        "hit_count":  0,
+                        "miss_count": 0,
+                        "valid":      True,
+                    },
+                    "previous_locators": [],
+                    "warnings":          doc.get("warnings", []),
+                    "template_id":       template_id,
+                }
+                self._locs.insert(new_doc)
+                copied += 1
+
+        return copied

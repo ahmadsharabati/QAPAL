@@ -172,7 +172,7 @@ async def cmd_crawl(args):
     credentials   = _load_credentials(args)
     spider        = getattr(args, "spider", False)
     depth         = getattr(args, "depth", 2)
-    async with Crawler(db, headless=headless_mode, credentials=credentials) as crawler:
+    async with Crawler(db, headless=headless_mode, credentials=credentials, state_graph=sg) as crawler:
         if spider:
             results = await crawler.spider_crawl(urls, max_depth=depth, force=args.force)
         else:
@@ -393,7 +393,7 @@ async def cmd_prd_run(args):
         spider = True
 
     print(f"\n [1/5] Crawling {len(urls)} URL(s) to gather active locators{'  [spider mode]' if spider else ''}...")
-    async with Crawler(db, headless=headless_mode, credentials=credentials) as crawler:
+    async with Crawler(db, headless=headless_mode, credentials=credentials, state_graph=sg) as crawler:
         if spider:
             crawl_results = await crawler.spider_crawl(urls, max_depth=depth, force=args.force)
             urls = list({r["url"] for r in crawl_results if r.get("crawled")} | set(urls))
