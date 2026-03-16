@@ -28,6 +28,9 @@ from typing import List, Optional
 
 from locator_db import LocatorDB, _normalize_url, DYNAMIC_ID_RE as _DYNAMIC_ID_RE
 from ai_client import AIClient
+from _log import get_logger
+
+log = get_logger("planner")
 
 try:
     from dotenv import load_dotenv
@@ -552,7 +555,8 @@ class Planner:
                     break  # clean plan — no hallucinated IDs
 
                 bad_ids = [item.get("element_id") for item in invalid_items]
-                print(f"  ⚠ [attempt {attempt + 1}] hallucinated element_ids: {bad_ids} — retrying")
+                log.warning("[attempt %d] hallucinated element_ids: %s — retrying",
+                            attempt + 1, bad_ids)
                 prompt = base_prompt + (
                     f"\n\nCRITICAL ERROR: In your previous response you invented these element_ids: {bad_ids}.\n"
                     f"element_ids MUST be copied verbatim from the bracketed IDs in Available Locators (e.g. [a3f92b...]).\n"
@@ -561,7 +565,7 @@ class Planner:
                 )
 
             except ValueError as e:
-                print(f"  ⚠ [attempt {attempt + 1}] invalid JSON — retrying")
+                log.warning("[attempt %d] invalid JSON — retrying", attempt + 1)
                 prompt += f"\n\nCRITICAL ERROR: Your output was not valid JSON. Error: {e}\nOutput ONLY valid JSON inside a ```json ... ``` block."
             except Exception as e:
                 raise PlanningError(f"AI call failed: {e}")

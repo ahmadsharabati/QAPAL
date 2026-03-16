@@ -25,6 +25,9 @@ from urllib.parse import urlparse
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
 from locator_db import LocatorDB, _make_id, _normalize_url, _compute_template_hash, _url_to_pattern
+from _log import get_logger
+
+log = get_logger("crawler")
 
 try:
     from dotenv import load_dotenv
@@ -776,14 +779,12 @@ class Crawler:
 
                 results.append(result)
                 if result["crawled"]:
-                    print(
-                        f"  [crawled] {url} — {result['elements']} elements "
-                        f"| {result['new']} new | {result['updated']} updated"
-                    )
+                    log.info("  [crawled] %s — %d elements | %d new | %d updated",
+                             url, result["elements"], result["new"], result["updated"])
                 else:
-                    print(f"  [skipped] {url} (fresh)")
+                    log.info("  [skipped] %s (fresh)", url)
                 for w in result.get("warnings", []):
-                    print(f"    ⚠  {w}")
+                    log.warning("  %s", w)
 
         await asyncio.gather(*[_one(u) for u in urls])
         return results
@@ -888,7 +889,8 @@ class Crawler:
         for depth in range(max_depth):
             if not current_level or len(all_urls) >= max_pages:
                 break
-            print(f"  [spider] depth {depth}: discovering links from {len(current_level)} page(s)...")
+            log.info("  [spider] depth %d: discovering links from %d page(s)...",
+                     depth, len(current_level))
             link_lists = await asyncio.gather(*[_extract_links(u) for u in current_level])
 
             next_level = []
@@ -904,7 +906,7 @@ class Crawler:
 
             current_level = next_level
 
-        print(f"  [spider] discovered {len(all_urls)} unique page type(s)")
+        log.info("  [spider] discovered %d unique page type(s)", len(all_urls))
         return await self.bulk_crawl(all_urls, concurrency=concurrency, force=force)
 
 
@@ -918,11 +920,11 @@ if __name__ == "__main__":
         db = LocatorDB()
         try:
             async with Crawler(db, headless=True) as crawler:
-                print("Crawler initialized. Running smoke test...")
+                log.info("Crawler initialized. Running smoke test...")
                 results = await crawler.bulk_crawl(["https://example.com"])
-                print(f"Crawled {len(results)} URLs.")
+                log.info("Crawled %d URLs.", len(results))
         except Exception as e:
-            print(f"Smoke test failed: {e}")
+            log.error("Smoke test failed: %s", e)
         finally:
             db.close()
 

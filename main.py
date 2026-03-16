@@ -39,6 +39,8 @@ from executor import Executor
 from ai_client import AIClient
 from semantic_extractor import extract_semantic_context, compute_dom_hash
 from state_graph import StateGraph
+from _log import get_logger, setup_logging
+from _tokens import get_token_tracker
 
 try:
     from dotenv import load_dotenv
@@ -46,40 +48,43 @@ try:
 except ImportError:
     pass
 
+log = get_logger("main")
+
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
 def _print_visual_regression_summary(results: list) -> None:
-    """Print a warning block for any tests with visual regressions."""
+    """Log a warning block for any tests with visual regressions."""
     flagged = [r for r in results if r.get("has_visual_regressions")]
     if not flagged:
         return
-    print(f"\n  ⚠  VISUAL REGRESSIONS detected in {len(flagged)} test(s):")
+    log.warning("\n  ⚠  VISUAL REGRESSIONS detected in %d test(s):", len(flagged))
     for r in flagged:
         for vr in r.get("visual_regressions", []):
-            print(f"     {r['id']} step {vr['step_index']}: {vr['diff_pct']}% pixel diff")
-            print(f"       baseline → {vr['baseline']}")
-            print(f"       diff     → {vr['diff']}")
+            log.warning("     %s step %s: %s%% pixel diff", r["id"], vr["step_index"], vr["diff_pct"])
+            log.warning("       baseline → %s", vr["baseline"])
+            log.warning("       diff     → %s", vr["diff"])
 
 
 def _print_passive_error_summary(results: list) -> None:
-    """Print a warning block for any tests that recorded passive errors."""
+    """Log a warning block for any tests that recorded passive errors."""
     flagged = [r for r in results if r.get("has_passive_errors")]
     if not flagged:
         return
-    print(f"\n  ⚠  PASSIVE ERRORS detected in {len(flagged)} test(s):")
+    log.warning("\n  ⚠  PASSIVE ERRORS detected in %d test(s):", len(flagged))
     for r in flagged:
         errs = r.get("passive_errors", {})
         nc = len(errs.get("console_errors",   []))
         nn = len(errs.get("network_failures", []))
         nj = len(errs.get("js_exceptions",    []))
-        print(f"     {r['id']}: {nc} console error(s), {nn} network failure(s), {nj} JS exception(s)")
+        log.warning("     %s: %d console error(s), %d network failure(s), %d JS exception(s)",
+                    r["id"], nc, nn, nj)
         for e in errs.get("console_errors",   [])[:3]:
-            print(f"       console: {e['text'][:120]}")
+            log.warning("       console: %s", e["text"][:120])
         for e in errs.get("network_failures", [])[:3]:
-            print(f"       network: {e['url'][:100]}  [{e.get('failure','')}]")
+            log.warning("       network: %s  [%s]", e["url"][:100], e.get("failure", ""))
         for e in errs.get("js_exceptions",    [])[:3]:
-            print(f"       js:      {str(e)[:120]}")
+            log.warning("       js:      %s", str(e)[:120])
 
 
 _HTML_REPORT_TEMPLATE = """\
@@ -212,7 +217,7 @@ def _load_json_files(patterns: List[str]) -> List[dict]:
                     data["_source"] = path
                     items.append(data)
             except Exception as e:
-                print(f"  Warning: could not load {path}: {e}")
+                log.warning("could not load %s: %s", path, e)
     return items
 
 
@@ -220,7 +225,7 @@ def _get_ai_client() -> Optional[AIClient]:
     try:
         return AIClient.from_env()
     except EnvironmentError as e:
-        print(f"  Warning: {e}")
+        log.warning("%s", e)
         return None
 
 
@@ -235,14 +240,14 @@ def _load_credentials(args) -> Optional[dict]:
         required = {"url", "username", "password"}
         missing = required - creds.keys()
         if missing:
-            print(f"  Error: credentials file missing keys: {', '.join(sorted(missing))}")
+            log.error("credentials file missing keys: %s", ", ".join(sorted(missing)))
             return None
         return creds
     except FileNotFoundError:
-        print(f"  Error: credentials file not found: {path}")
+        log.error("credentials file not found: %s", path)
         return None
     except json.JSONDecodeError as e:
-        print(f"  Error: credentials file is not valid JSON: {e}")
+        log.error("credentials file is not valid JSON: %s", e)
         return None
 
 
@@ -274,7 +279,7 @@ async def _extract_semantics(db: LocatorDB, urls: List[str], headless: bool) -> 
                 db.upsert_state(url, dom_hash_val, semantic_ctx)
                 processed += 1
             except Exception as e:
-                print(f"  Warning: semantic extraction failed for {url}: {e}")
+                log.warning("semantic extraction failed for %s: %s", url, e)
         await browser.close()
     return processed
 
@@ -284,12 +289,12 @@ async def _extract_semantics(db: LocatorDB, urls: List[str], headless: bool) -> 
 async def cmd_crawl(args):
     urls = args.urls
     if not urls:
-        print("No URLs provided. Use --urls https://... https://...")
+        log.error("No URLs provided. Use --urls https://... https://...")
         return 1
 
     db = LocatorDB()
     sg = StateGraph(db)
-    print(f"\n Crawling {len(urls)} URL(s)  [db: {db._path}]")
+    log.info("\n Crawling %d URL(s)  [db: %s]", len(urls), db._path)
     t0 = time.monotonic()
 
     headless_mode = True if args.headless else None
@@ -307,10 +312,10 @@ async def cmd_crawl(args):
     crawled        = sum(1 for r in results if r.get("crawled"))
     duration       = int((time.monotonic() - t0) * 1000)
 
-    print(f"\n Crawl complete")
-    print(f"   pages crawled : {crawled}/{len(urls)}")
-    print(f"   elements      : {total_elements} ({total_new} new)")
-    print(f"   duration      : {duration}ms")
+    log.info("\n Crawl complete")
+    log.info("   pages crawled : %d/%d", crawled, len(urls))
+    log.info("   elements      : %d (%d new)", total_elements, total_new)
+    log.info("   duration      : %dms", duration)
     db.close()
     return 0
 
@@ -318,20 +323,20 @@ async def cmd_crawl(args):
 async def cmd_semantic(args):
     urls = args.urls
     if not urls:
-        print("No URLs provided. Use --urls https://...")
+        log.error("No URLs provided. Use --urls https://...")
         return 1
 
     db           = LocatorDB()
     headless     = args.headless if hasattr(args, "headless") else True
-    print(f"\n Extracting semantic context for {len(urls)} URL(s)  [db: {db._path}]")
+    log.info("\n Extracting semantic context for %d URL(s)  [db: %s]", len(urls), db._path)
     t0 = time.monotonic()
 
     processed = await _extract_semantics(db, urls, headless=headless)
 
     duration = int((time.monotonic() - t0) * 1000)
-    print(f"\n Semantic pipeline complete")
-    print(f"   URLs processed: {processed}/{len(urls)}")
-    print(f"   duration      : {duration}ms")
+    log.info("\n Semantic pipeline complete")
+    log.info("   URLs processed: %d/%d", processed, len(urls))
+    log.info("   duration      : %dms", duration)
     db.close()
     return 0
 
@@ -339,7 +344,7 @@ async def cmd_semantic(args):
 async def cmd_plan(args):
     test_cases = _load_json_files(args.tests)
     if not test_cases:
-        print("No test cases found.")
+        log.error("No test cases found.")
         return 1
 
     ai     = _get_ai_client()
@@ -349,7 +354,7 @@ async def cmd_plan(args):
     output_dir = Path(args.output or "plans")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n Planning {len(test_cases)} test(s)  [ai: {ai.provider if ai else 'none'}]")
+    log.info("\n Planning %d test(s)  [ai: %s]", len(test_cases), ai.provider if ai else "none")
     ok = failed = 0
 
     for tc in test_cases:
@@ -359,13 +364,16 @@ async def cmd_plan(args):
             path = output_dir / f"{tc_id}_plan.json"
             with open(path, "w") as f:
                 json.dump(plan, f, indent=2)
-            print(f"  ✓ {tc_id}  ({len(plan.get('steps',[]))} steps)  → {path}")
+            log.info("  ✓ %s  (%d steps)  → %s", tc_id, len(plan.get("steps", [])), path)
             ok += 1
         except PlanningError as e:
-            print(f"  ✗ {tc_id}  {e}")
+            log.error("  ✗ %s  %s", tc_id, e)
             failed += 1
 
-    print(f"\n   success: {ok}  failed: {failed}")
+    log.info("\n   success: %d  failed: %d", ok, failed)
+    tok = get_token_tracker().format_line("plan")
+    if tok:
+        log.info(tok)
     db.close()
     return 1 if failed else 0
 
@@ -377,7 +385,7 @@ async def cmd_run(args):
     else:
         test_cases = _load_json_files(args.tests or [])
         if not test_cases:
-            print("No test cases or plans provided.")
+            log.error("No test cases or plans provided.")
             return 1
         ai      = _get_ai_client()
         db      = LocatorDB()
@@ -389,14 +397,14 @@ async def cmd_run(args):
                 try:
                     plans.append(planner.create_plan(tc, cache_key=tc_id))
                 except PlanningError as e:
-                    print(f"  Planning failed for {tc_id}: {e}")
+                    log.error("  Planning failed for %s: %s", tc_id, e)
                     plans.append({"id": tc_id, "_planning_error": str(e)})
         finally:
             db.close()
 
     valid_plans = [p for p in plans if not p.get("_planning_error")]
     if not valid_plans:
-        print("No valid plans to run.")
+        log.error("No valid plans to run.")
         return 1
 
     ai          = _get_ai_client()
@@ -408,8 +416,8 @@ async def cmd_run(args):
         results     = []
 
         parallel = getattr(args, "parallel", 1) or 1
-        print(f"\n Running {len(valid_plans)} test(s)"
-              + (f"  [parallel={parallel}]" if parallel > 1 else ""))
+        log.info("\n Running %d test(s)%s", len(valid_plans),
+                 f"  [parallel={parallel}]" if parallel > 1 else "")
 
         headless_mode = True if args.headless else None
         async with Executor(db, headless=headless_mode, ai_client=ai,
@@ -419,24 +427,28 @@ async def cmd_run(args):
             else:
                 for plan in valid_plans:
                     tc_id = plan.get("id") or plan.get("test_id") or plan.get("_meta", {}).get("test_id", "?")
-                    print(f"  {tc_id} ...", end=" ", flush=True)
+                    log.info("  %s ...", tc_id)
                     result = await exc.run(plan)
                     results.append(result)
                     icon = "✓" if result["status"] == "pass" else "✗"
-                    print(f"{icon} {result['status']}  ({result['duration_ms']}ms)")
+                    log.info("  %s %s %s  (%dms)",
+                             tc_id, icon, result["status"], result["duration_ms"])
                     if result["status"] == "fail":
                         for s in result.get("steps", []):
                             if s.get("status") == "fail":
-                                print(f"    step fail: {s.get('reason')}")
+                                log.error("    step fail: %s", s.get("reason"))
                         for a in result.get("assertions", []):
                             if a.get("status") == "fail":
-                                print(f"    assert fail: {a.get('reason')}")
+                                log.error("    assert fail: %s", a.get("reason"))
 
         duration = int((time.monotonic() - t0) * 1000)
         passed   = sum(1 for r in results if r.get("status") == "pass")
         failed   = len(results) - passed
 
-        print(f"\n   passed: {passed}  failed: {failed}  duration: {duration}ms")
+        log.info("\n   passed: %d  failed: %d  duration: %dms", passed, failed, duration)
+        tok = get_token_tracker().format_line("run")
+        if tok:
+            log.info(tok)
         _print_passive_error_summary(results)
 
         # Save report
@@ -448,8 +460,8 @@ async def cmd_run(args):
         with open(report_path, "w") as f:
             json.dump({"summary": summary_data, "results": results, "generated_at": datetime.now(timezone.utc).isoformat()}, f, indent=2)
         html_path = _write_html_report(report_path, results, summary_data)
-        print(f"   report  → {report_path}")
-        print(f"   html    → {html_path}")
+        log.info("   report  → %s", report_path)
+        log.info("   html    → %s", html_path)
 
         return 1 if failed else 0
     finally:
@@ -471,16 +483,17 @@ async def cmd_status(args):
     sg_stats = sg.stats()
 
     pages_with_shots = sum(1 for p in db.all_pages() if p.get("screenshot_path"))
-    print(f"\n QAPal Status")
-    print(f"   database        : {stats['db_path']}")
-    print(f"   total elements  : {stats['total_elements']}  (valid: {stats['valid_elements']})")
-    print(f"   pages crawled   : {stats['total_pages']}  (screenshots: {pages_with_shots})")
-    print(f"   semantic states : {stats.get('total_states', 0)}")
-    print(f"   sessions        : {stats['total_sessions']}")
-    print(f"   low-conf        : {stats['low_confidence']}")
-    print(f"   with warnings   : {stats['with_warnings']}")
-    print(f"   graph edges     : {sg_stats['total_transitions']}  (pages: {sg_stats['unique_pages']})")
-    print(f"   AI client       : {ai_str}")
+    log.info("\n QAPal Status")
+    log.info("   database        : %s", stats["db_path"])
+    log.info("   total elements  : %d  (valid: %d)", stats["total_elements"], stats["valid_elements"])
+    log.info("   pages crawled   : %d  (screenshots: %d)", stats["total_pages"], pages_with_shots)
+    log.info("   semantic states : %d", stats.get("total_states", 0))
+    log.info("   sessions        : %d", stats["total_sessions"])
+    log.info("   low-conf        : %d", stats["low_confidence"])
+    log.info("   with warnings   : %d", stats["with_warnings"])
+    log.info("   graph edges     : %d  (pages: %d)",
+             sg_stats["total_transitions"], sg_stats["unique_pages"])
+    log.info("   AI client       : %s", ai_str)
     db.close()
     return 0
 
@@ -490,7 +503,7 @@ async def cmd_prd_run(args):
 
     ai = _get_ai_client()
     if not ai:
-        print("Error: QAPAL_AI_PROVIDER environment variable is required for prd-run.")
+        log.error("QAPAL_AI_PROVIDER environment variable is required for prd-run.")
         return 1
 
     prd_files = args.prd
@@ -509,7 +522,7 @@ async def cmd_prd_run(args):
         from executor import VISUAL_BASELINE_DIR
         if VISUAL_BASELINE_DIR.exists():
             shutil.rmtree(VISUAL_BASELINE_DIR)
-            print(f"\n  [baseline] Cleared visual regression baselines → {VISUAL_BASELINE_DIR}")
+            log.info("\n  [baseline] Cleared visual regression baselines → %s", VISUAL_BASELINE_DIR)
 
     # 1. Crawl — populates locator DB
     spider = getattr(args, "spider", False)
@@ -518,10 +531,11 @@ async def cmd_prd_run(args):
     # Auto-spider when the nav graph is nearly empty (first run on a new site).
     # This ensures the AI has enough locator context to generate accurate plans.
     if not spider and sg.stats().get("unique_pages", 0) < 3:
-        print(f"\n [auto] Nav graph is sparse — enabling --spider for first-run discovery.")
+        log.info("\n [auto] Nav graph is sparse — enabling --spider for first-run discovery.")
         spider = True
 
-    print(f"\n [1/5] Crawling {len(urls)} URL(s) to gather active locators{'  [spider mode]' if spider else ''}...")
+    log.info("\n [1/5] Crawling %d URL(s) to gather active locators%s...",
+             len(urls), "  [spider mode]" if spider else "")
     async with Crawler(db, headless=headless_mode, credentials=credentials, state_graph=sg) as crawler:
         if spider:
             crawl_results = await crawler.spider_crawl(urls, max_depth=depth, force=args.force)
@@ -532,9 +546,9 @@ async def cmd_prd_run(args):
     # 2. Semantic pipeline — separate step so context can be reprocessed
     #    without re-crawling.  Uses live pages, no extra HTTP round-trips.
     headless_bool = headless_mode if headless_mode is not None else True
-    print(f"\n [2/5] Extracting semantic context for {len(urls)} URL(s)...")
+    log.info("\n [2/5] Extracting semantic context for %d URL(s)...", len(urls))
     processed = await _extract_semantics(db, urls, headless=headless_bool)
-    print(f"   semantic contexts saved: {processed}/{len(urls)}")
+    log.info("   semantic contexts saved: %d/%d", processed, len(urls))
 
     num_tests       = getattr(args, "num_tests", None)
     negative_tests  = getattr(args, "negative_tests", False)
@@ -543,18 +557,20 @@ async def cmd_prd_run(args):
     compiled_model_path = None
     if use_compile:
         compiled_model_path = "compiled_model.json"
-        print(f"\n [2.5/5] Compiling site model...")
+        log.info("\n [2.5/5] Compiling site model...")
         from site_compiler import SiteCompiler
         compiler = SiteCompiler(db, state_graph=sg)
         compiled_model = compiler.compile(output_path=compiled_model_path)
-        print(f"   compiled {compiled_model.locator_count} locators → ~{len(compiled_model.format_for_prompt()) // 4} tokens")
+        log.info("   compiled %d locators → ~%d tokens",
+                 compiled_model.locator_count, len(compiled_model.format_for_prompt()) // 4)
     elif Path("compiled_model.json").exists():
         # Auto-detect existing fresh compiled model
         from site_compiler import SiteCompiler
         existing = SiteCompiler.load("compiled_model.json")
         if existing and not existing.is_stale(max_age_minutes=120):
             compiled_model_path = "compiled_model.json"
-            print(f"   [compile] Auto-detected compiled_model.json ({existing.locator_count} locators)")
+            log.info("   [compile] Auto-detected compiled_model.json (%d locators)",
+                     existing.locator_count)
 
     generator = TestGenerator(db, ai_client=ai, max_cases=args.max_cases, state_graph=sg,
                               max_locators=getattr(args, "max_locators", 400),
@@ -568,18 +584,20 @@ async def cmd_prd_run(args):
     for prd_path_str in prd_files:
         prd_path = Path(prd_path_str)
         if not prd_path.exists():
-            print(f"Error: PRD file not found at {prd_path_str}")
+            log.error("PRD file not found at %s", prd_path_str)
             continue
 
-        print(f"\n Reading PRD: {prd_path}")
+        log.info("\n Reading PRD: %s", prd_path)
         prd_content = prd_path.read_text('utf-8')
 
         # 3. Plan (Generate from PRD)
-        print(f"\n [3/5] Generating execution plans from PRD: {prd_path.name}  [ai: {ai.provider}]")
+        get_token_tracker().reset()   # measure tokens for this plan generation alone
+        log.info("\n [3/5] Generating execution plans from PRD: %s  [ai: %s]",
+                 prd_path.name, ai.provider)
         try:
             plans = generator.generate_plans_from_prd(prd_content, urls, credentials=credentials)
         except Exception as e:
-            print(f"Error generating plans for {prd_path.name}: {e}")
+            log.error("Error generating plans for %s: %s", prd_path.name, e)
             continue
 
         # Derive a slug from the PRD filename to prefix plan IDs, preventing
@@ -589,11 +607,11 @@ async def cmd_prd_run(args):
         prd_slug = re.sub(r"[^a-zA-Z0-9]+", "-", prd_slug).strip("-").lower()
 
         valid_plans = []
-        print("\n   Generated Plans:")
+        log.info("\n   Generated Plans:")
         for p in plans:
             tc_id = p.get("test_id", "unknown")
             if p.get("_planning_error"):
-                print(f"  ✗ {tc_id}  {p['_planning_error']}")
+                log.error("  ✗ %s  %s", tc_id, p["_planning_error"])
             else:
                 # Prefix test_id with slug if not already prefixed
                 if prd_slug and not tc_id.startswith(prd_slug):
@@ -603,17 +621,24 @@ async def cmd_prd_run(args):
                 path = output_dir / f"{tc_id}_plan.json"
                 with open(path, "w") as f:
                     json.dump(p, f, indent=2)
-                print(f"  ✓ {tc_id}  ({len(p.get('steps',[]))} steps)  → {path}")
+                log.info("  ✓ %s  (%d steps)  → %s", tc_id, len(p.get("steps", [])), path)
                 valid_plans.append(p)
 
+        # Show token cost of this planning call
+        tok = get_token_tracker().format_line("plan")
+        if tok:
+            log.info(tok)
+
         if not valid_plans:
-            print(f"\n No valid plans generated for {prd_path.name}.")
+            log.warning("\n No valid plans generated for %s.", prd_path.name)
             continue
 
         # 4. Execute
         parallel = getattr(args, "parallel", 1) or 1
-        print(f"\n [4/5] Running {len(valid_plans)} generated plan(s) for {prd_path.name}"
-              + (f"  [parallel={parallel}]" if parallel > 1 else "") + "...")
+        get_token_tracker().reset()   # measure AI tokens consumed by recovery during execution
+        log.info("\n [4/5] Running %d generated plan(s) for %s%s...",
+                 len(valid_plans), prd_path.name,
+                 f"  [parallel={parallel}]" if parallel > 1 else "")
 
         async with Executor(db, headless=headless_mode, ai_client=ai,
                             credentials=credentials, state_graph=sg) as exc:
@@ -623,26 +648,32 @@ async def cmd_prd_run(args):
             else:
                 for plan in valid_plans:
                     tc_id = plan.get("test_id", "?")
-                    print(f"  {tc_id} ...", end=" ", flush=True)
+                    log.info("  %s ...", tc_id)
                     result = await exc.run(plan)
                     all_results.append(result)
                     icon = "✓" if result["status"] == "pass" else "✗"
-                    print(f"{icon} {result['status']}  ({result['duration_ms']}ms)")
+                    log.info("  %s %s %s  (%dms)",
+                             tc_id, icon, result["status"], result["duration_ms"])
                     if result["status"] == "fail":
                         for s in result.get("steps", []):
                             if s.get("status") == "fail":
-                                print(f"    step fail: {s.get('reason')}")
+                                log.error("    step fail: %s", s.get("reason"))
                         for a in result.get("assertions", []):
                             if a.get("status") == "fail":
-                                print(f"    assert fail: {a.get('reason')}")
+                                log.error("    assert fail: %s", a.get("reason"))
+
+        # Show AI tokens consumed by recovery (normally 0 — deterministic execution)
+        tok = get_token_tracker().format_line("run")
+        if tok:
+            log.info(tok)
 
     # 5. Report
     duration = int((time.monotonic() - t0) * 1000)
     passed   = sum(1 for r in all_results if r.get("status") == "pass")
     failed   = len(all_results) - passed
 
-    print(f"\n [5/5] Summary")
-    print(f"   passed: {passed}  failed: {failed}  total duration: {duration}ms")
+    log.info("\n [5/5] Summary")
+    log.info("   passed: %d  failed: %d  total duration: %dms", passed, failed, duration)
     _print_passive_error_summary(all_results)
     _print_visual_regression_summary(all_results)
 
@@ -654,8 +685,8 @@ async def cmd_prd_run(args):
     with open(report_path, "w") as f:
         json.dump({"summary": summary_data, "results": all_results, "generated_at": datetime.now(timezone.utc).isoformat()}, f, indent=2)
     html_path = _write_html_report(report_path, all_results, summary_data)
-    print(f"   report  → {report_path}")
-    print(f"   html    → {html_path}")
+    log.info("   report  → %s", report_path)
+    log.info("   html    → %s", html_path)
 
     db.close()
     return 1 if failed else 0
@@ -672,18 +703,18 @@ async def cmd_compile(args):
     out  = getattr(args, "output", "compiled_model.json") or "compiled_model.json"
 
     stats = db.stats()
-    print(f"\n [compile] Compiling locator DB ({stats['total_elements']} elements → {out})")
+    log.info("\n [compile] Compiling locator DB (%d elements → %s)", stats["total_elements"], out)
     t0 = time.monotonic()
 
     compiler = SiteCompiler(db, state_graph=sg)
     model    = compiler.compile(output_path=out)
 
     duration = int((time.monotonic() - t0) * 1000)
-    print(f"   locators   : {model.locator_count}")
-    print(f"   prompt size: ~{len(model.format_for_prompt()) // 4} tokens")
-    print(f"   output     : {out}")
-    print(f"   duration   : {duration}ms")
-    print(f"\n Preview:\n{model.format_for_prompt()}")
+    log.info("   locators   : %d", model.locator_count)
+    log.info("   prompt size: ~%d tokens", len(model.format_for_prompt()) // 4)
+    log.info("   output     : %s", out)
+    log.info("   duration   : %dms", duration)
+    log.info("\n Preview:\n%s", model.format_for_prompt())
 
     db.close()
     return 0
@@ -718,8 +749,8 @@ async def cmd_graph_crawl(args):
     queue     = [(u, 0) for u in urls]
     pages_done = 0
 
-    print(f"\n Graph-crawl  [db: {db._path}]")
-    print(f"   start URLs : {len(urls)}  |  max pages: {max_pages}  |  depth: {depth}")
+    log.info("\n Graph-crawl  [db: %s]", db._path)
+    log.info("   start URLs : %d  |  max pages: %d  |  depth: %d", len(urls), max_pages, depth)
 
     async with async_playwright() as pw:
         pw.selectors.set_test_id_attribute("data-test")
@@ -744,7 +775,7 @@ async def cmd_graph_crawl(args):
                 result = await crawl_page(page, norm, db)
                 pages_done += 1
                 status = f"{result['elements']} elements | {result['new']} new"
-                print(f"  [graph-crawl] ({pages_done}/{max_pages}) {norm} — {status}")
+                log.info("  [graph-crawl] (%d/%d) %s — %s", pages_done, max_pages, norm, status)
 
                 if current_depth >= depth:
                     return []
@@ -775,7 +806,7 @@ async def cmd_graph_crawl(args):
                     if dest_norm not in visited:
                         discovered.append(href)
             except Exception as e:
-                print(f"  [graph-crawl] failed {norm}: {e}")
+                log.warning("  [graph-crawl] failed %s: %s", norm, e)
             finally:
                 await ctx.close()
             return discovered
@@ -799,10 +830,11 @@ async def cmd_graph_crawl(args):
 
     sg_stats = sg.stats()
     duration = int((time.monotonic() - t0) * 1000)
-    print(f"\n Graph-crawl complete")
-    print(f"   pages crawled : {pages_done}")
-    print(f"   graph edges   : {sg_stats['total_transitions']}  (pages: {sg_stats['unique_pages']})")
-    print(f"   duration      : {duration}ms")
+    log.info("\n Graph-crawl complete")
+    log.info("   pages crawled : %d", pages_done)
+    log.info("   graph edges   : %d  (pages: %d)",
+             sg_stats["total_transitions"], sg_stats["unique_pages"])
+    log.info("   duration      : %dms", duration)
     db.close()
     return 0
 
@@ -817,21 +849,21 @@ async def cmd_graph(args):
     sg      = StateGraph(db)
     stats   = sg.stats()
 
-    print(f"\n State Graph  [db: {db._path}]")
-    print(f"   graph edges  : {stats['total_transitions']}")
-    print(f"   unique pages : {stats['unique_pages']}")
+    log.info("\n State Graph  [db: %s]", db._path)
+    log.info("   graph edges  : %d", stats["total_transitions"])
+    log.info("   unique pages : %d", stats["unique_pages"])
 
     if stats["total_transitions"] == 0:
-        print("\n   (no transitions recorded yet — run tests first)")
+        log.info("\n   (no transitions recorded yet — run tests first)")
         db.close()
         return 0
 
     # ── --stats only ─────────────────────────────────────────────────
     if getattr(args, "stats", False):
         if stats["most_traversed"]:
-            print("\n   Most traversed:")
+            log.info("\n   Most traversed:")
             for frm, to, count in stats["most_traversed"]:
-                print(f"     {frm} → {to}  ({count}x)")
+                log.info("     %s → %s  (%dx)", frm, to, count)
         db.close()
         return 0
 
@@ -840,16 +872,16 @@ async def cmd_graph(args):
         from_url, to_url = args.path
         path = sg.get_path(from_url, to_url)
         if path is None:
-            print(f"\n   No path found from {from_url} to {to_url}")
+            log.info("\n   No path found from %s to %s", from_url, to_url)
         else:
             hops = len(path)
-            print(f"\n   Shortest path ({hops} hop{'s' if hops != 1 else ''}):")
+            log.info("\n   Shortest path (%d hop%s):", hops, "s" if hops != 1 else "")
             for i, edge in enumerate(path):
                 t  = edge["trigger"]
                 frm = edge["from_url"]
-                print(f"     {i + 1}. {frm}")
-                print(f"        {t['action']} \"{t['label']}\"")
-            print(f"     {hops + 1}. {to_url}")
+                log.info("     %d. %s", i + 1, frm)
+                log.info('        %s "%s"', t["action"], t["label"])
+            log.info("     %d. %s", hops + 1, to_url)
         db.close()
         return 0
 
@@ -865,7 +897,7 @@ async def cmd_graph(args):
 
     transitions = sorted(transitions, key=lambda t: t["traversal_count"], reverse=True)
 
-    print(f"\n Edges ({len(transitions)} shown):")
+    log.info("\n Edges (%d shown):", len(transitions))
     for t in transitions:
         tr  = t["trigger"]
         frm = t["from_url"]
@@ -873,8 +905,8 @@ async def cmd_graph(args):
         act = tr.get("action", "?")
         lbl = tr.get("label", "")
         cnt = t["traversal_count"]
-        print(f"   {frm}")
-        print(f"     --[{act} \"{lbl}\"]--> {to}  ({cnt}x)")
+        log.info("   %s", frm)
+        log.info('     --[%s "%s"]--> %s  (%dx)', act, lbl, to, cnt)
 
     db.close()
     return 0
@@ -897,18 +929,18 @@ async def cmd_explore(args):
     try:
         vision = VisionClient.from_env()
     except EnvironmentError as e:
-        print(f"  Warning: Vision client not available ({e}) — using text-only exploration")
+        log.warning("Vision client not available (%s) — using text-only exploration", e)
         vision = None
 
     headless    = bool(args.headless)
     credentials = _load_credentials(args)
     max_steps   = getattr(args, "max_steps", 30)
 
-    print(f"\n [explore] Starting autonomous exploration")
-    print(f"   URL:       {url}")
-    print(f"   Goal:      {goal}")
-    print(f"   Max steps: {max_steps}")
-    print(f"   Vision:    {'enabled' if vision else 'disabled (text-only)'}")
+    log.info("\n [explore] Starting autonomous exploration")
+    log.info("   URL:       %s", url)
+    log.info("   Goal:      %s", goal)
+    log.info("   Max steps: %d", max_steps)
+    log.info("   Vision:    %s", "enabled" if vision else "disabled (text-only)")
 
     t0 = time.monotonic()
     async with Explorer(
@@ -919,31 +951,35 @@ async def cmd_explore(args):
 
     duration = int((time.monotonic() - t0) * 1000)
 
-    print(f"\n [explore] Exploration complete")
-    print(f"   Steps taken:   {len(trace.steps)}")
-    print(f"   Pages visited: {trace.pages_visited}")
-    print(f"   Vision calls:  {trace.vision_calls}")
-    print(f"   UX findings:   {len(trace.ux_findings)}")
-    print(f"   Duration:      {duration}ms")
+    log.info("\n [explore] Exploration complete")
+    log.info("   Steps taken:   %d", len(trace.steps))
+    log.info("   Pages visited: %d", trace.pages_visited)
+    log.info("   Vision calls:  %d", trace.vision_calls)
+    log.info("   UX findings:   %d", len(trace.ux_findings))
+    log.info("   Duration:      %dms", duration)
+    tok = get_token_tracker().format_line("explore")
+    if tok:
+        log.info(tok)
 
     # Severity breakdown
     sev_counts = {"high": 0, "medium": 0, "low": 0}
     for f in trace.ux_findings:
         sev_counts[f.get("severity", "low")] = sev_counts.get(f.get("severity", "low"), 0) + 1
-    print(f"   Severity:      {sev_counts['high']} high, {sev_counts['medium']} medium, {sev_counts['low']} low")
+    log.info("   Severity:      %d high, %d medium, %d low",
+             sev_counts["high"], sev_counts["medium"], sev_counts["low"])
 
-    # Print top findings
+    # Log top findings
     high_findings = [f for f in trace.ux_findings if f.get("severity") == "high"]
     if high_findings:
-        print(f"\n   High-severity findings:")
+        log.info("\n   High-severity findings:")
         for f in high_findings[:5]:
-            print(f"     - [{f.get('category', '?')}] {f.get('description', '')[:100]}")
+            log.info("     - [%s] %s", f.get("category", "?"), f.get("description", "")[:100])
 
     # Generate report
     html_path, json_path = generate_exploration_report(trace, output_dir="reports")
-    print(f"\n   report → {html_path}")
-    print(f"   json   → {json_path}")
-    print(f"   trace  → reports/exploration/{trace.session_id}/trace.json")
+    log.info("\n   report → %s", html_path)
+    log.info("   json   → %s", json_path)
+    log.info("   trace  → reports/exploration/%s/trace.json", trace.session_id)
 
     db.close()
     return 0
@@ -960,7 +996,7 @@ async def cmd_ux_audit(args):
 
     urls = args.urls
     if not urls:
-        print("No URLs provided. Use --urls https://...")
+        log.error("No URLs provided. Use --urls https://...")
         return 1
 
     db = LocatorDB()
@@ -975,9 +1011,9 @@ async def cmd_ux_audit(args):
 
     evaluator = UXEvaluator(db, vision_client=vision)
 
-    print(f"\n [ux-audit] Auditing {len(urls)} URL(s)")
-    print(f"   Mode:   {'static (DB only)' if static_only else 'live (browser + vision)'}")
-    print(f"   Vision: {'enabled' if vision and not static_only else 'disabled'}")
+    log.info("\n [ux-audit] Auditing %d URL(s)", len(urls))
+    log.info("   Mode:   %s", "static (DB only)" if static_only else "live (browser + vision)")
+    log.info("   Vision: %s", "enabled" if vision and not static_only else "disabled")
 
     t0           = time.monotonic()
     all_findings = []
@@ -988,7 +1024,7 @@ async def cmd_ux_audit(args):
         for url in urls:
             findings = evaluator.audit_static(url)
             all_findings.extend(findings)
-            print(f"   {url}: {len(findings)} finding(s)")
+            log.info("   %s: %d finding(s)", url, len(findings))
     else:
         # Live mode: open browser, run DOM + vision checks
         async with async_playwright() as pw:
@@ -1013,10 +1049,11 @@ async def cmd_ux_audit(args):
                     vision_count = sum(1 for f in findings if f.source == "vision")
                     vision_calls += min(1, vision_count)  # 1 vision call per page
                     rule_count   = sum(1 for f in findings if f.source == "rule")
-                    print(f"   {url}: {len(findings)} finding(s) ({rule_count} rule, {vision_count} vision)")
+                    log.info("   %s: %d finding(s) (%d rule, %d vision)",
+                             url, len(findings), rule_count, vision_count)
 
                 except Exception as e:
-                    print(f"   {url}: ERROR — {e}")
+                    log.error("   %s: ERROR — %s", url, e)
                 finally:
                     await ctx.close()
 
@@ -1036,15 +1073,19 @@ async def cmd_ux_audit(args):
     )
 
     sev = audit.severity_counts
-    print(f"\n [ux-audit] Audit complete")
-    print(f"   Score:    {score}/100 (Grade: {audit.grade})")
-    print(f"   Findings: {len(all_findings)} total ({sev['high']} high, {sev['medium']} medium, {sev['low']} low)")
-    print(f"   Duration: {duration}ms")
+    log.info("\n [ux-audit] Audit complete")
+    log.info("   Score:    %d/100 (Grade: %s)", score, audit.grade)
+    log.info("   Findings: %d total (%d high, %d medium, %d low)",
+             len(all_findings), sev["high"], sev["medium"], sev["low"])
+    log.info("   Duration: %dms", duration)
+    tok = get_token_tracker().format_line("ux-audit")
+    if tok:
+        log.info(tok)
 
     # Generate reports
     html_path, json_path = generate_ux_report(audit, output_dir="reports")
-    print(f"\n   report → {html_path}")
-    print(f"   json   → {json_path}")
+    log.info("\n   report → %s", html_path)
+    log.info("   json   → %s", json_path)
 
     db.close()
     return 0
@@ -1053,6 +1094,7 @@ async def cmd_ux_audit(args):
 # ── Entry point ───────────────────────────────────────────────────────
 
 def main():
+    setup_logging()
     parser = argparse.ArgumentParser(
         description="QAPal — deterministic AI UI testing",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1197,7 +1239,7 @@ def main():
         elif args.cmd == "ux-audit":
             return asyncio.run(cmd_ux_audit(args))
     except KeyboardInterrupt:
-        print("\nInterrupted.")
+        log.warning("\nInterrupted.")
         return 130
 
 

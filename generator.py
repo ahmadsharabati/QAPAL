@@ -13,6 +13,10 @@ from typing import List, Optional
 from locator_db import LocatorDB, DYNAMIC_ID_RE as _DYNAMIC_ID_RE
 from planner import PlanningError, _format_locators, _format_semantic_contexts, _parse_plan
 from ai_client import AIClient
+from _log import get_logger
+from _tokens import get_token_tracker
+
+log = get_logger("generator")
 
 
 _GENERATOR_SYSTEM = """You are a test automation engineer for QAPal, a deterministic UI test automation system.
@@ -305,9 +309,10 @@ class TestGenerator:
                 model = SiteCompiler.load(self._compiled_model_path)
                 if model and not model.is_stale(max_age_minutes=120):
                     compiled_locators_text = model.format_for_prompt()
-                    print(f"  [compile] Using compiled model ({model.locator_count} locators → ~{len(compiled_locators_text)//4} tokens)")
+                    log.info("  [compile] Using compiled model (%d locators → ~%d tokens)",
+                             model.locator_count, len(compiled_locators_text) // 4)
             except Exception as e:
-                print(f"  [compile] Compiled model load failed, using raw locators: {e}")
+                log.warning("[compile] Compiled model load failed, using raw locators: %s", e)
 
         locators_section = compiled_locators_text or _format_locators(locators, self._max_locators, group_by_url=True)
 
@@ -404,7 +409,7 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
         try:
             raw = self._ai.complete(prompt, system_prompt=self._NEGATIVE_SYSTEM, max_tokens=4096, temperature=0)
         except Exception as e:
-            print(f"  ⚠ negative test generation skipped: {e}")
+            log.warning("negative test generation skipped: %s", e)
             return []
 
         try:
@@ -417,7 +422,7 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
                 )
             return neg_plans
         except Exception as e:
-            print(f"  ⚠ negative test parsing failed: {e}")
+            log.warning("negative test parsing failed: %s", e)
             return []
 
     def _validate_plan_with_small_model(self, plan: dict, locators: list) -> dict:
@@ -1075,8 +1080,8 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
             {"action": "fill",      "selector": {"strategy": "testid", "value": password_testid}, "value": password},
             {"action": "click",     "selector": {"strategy": "testid", "value": submit_testid}},
         ]
-        print(f"  ↪ [auto-inject] login steps prepended to {plan.get('test_id')} "
-              f"(auth-only URL detected)")
+        log.info("  [auto-inject] login steps prepended to %s (auth-only URL detected)",
+                 plan.get("test_id"))
         return {**plan, "steps": login_steps + steps}
 
     def _find_cart_nav_testid(self) -> Optional[str]:
@@ -1159,7 +1164,8 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
                         continue  # skip the original product-URL navigate
             new_steps.append(s)
         if new_steps != steps:
-            print(f"  ↪ [auto-fix] product URL navigate replaced with category+testid_prefix in {plan.get('test_id')}")
+            log.debug("[auto-fix] product URL navigate replaced with category+testid_prefix in %s",
+                      plan.get("test_id"))
         steps = new_steps
 
         cart_required_patterns = ("/checkout", "/order", "/cart", "/basket", "/payment")
@@ -1219,7 +1225,7 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
                         "timeout": 15000,
                     },
                 ]
-                print(f"  ↪ [auto-inject] add-to-cart steps prepended to {plan.get('test_id')}")
+                log.info("  [auto-inject] add-to-cart steps prepended to %s", plan.get("test_id"))
                 steps = cart_steps + steps
 
         # ── Repair 2: inject cart-nav click before cart navigate if missing ─
@@ -1242,8 +1248,8 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
                         "timeout":  10000,
                     }
                     steps = steps[:first_cart_nav_idx] + [nav_step] + steps[first_cart_nav_idx:]
-                    print(f"  ↪ [auto-inject] cart-nav click (testid={cart_nav_testid!r}) "
-                          f"injected in {plan.get('test_id')}")
+                    log.info("  [auto-inject] cart-nav click (testid=%r) injected in %s",
+                             cart_nav_testid, plan.get("test_id"))
 
         return {**plan, "steps": steps}
 
@@ -1402,7 +1408,7 @@ if __name__ == "__main__":
         try:
             ai = AIClient.from_env()
             gen = TestGenerator(db, ai, max_cases=True)
-            print("Generator initialized. Running smoke test...")
+            log.info("Generator initialized. Running smoke test...")
             prd = "# Login\nUser must enter email and password."
             # Mock some locators in DB if empty for the test
             db.upsert("https://example.com", {
@@ -1411,11 +1417,11 @@ if __name__ == "__main__":
                 "actionable": True
             })
             plans = gen.generate_plans_from_prd(prd, ["https://example.com"])
-            print(f"Generated {len(plans)} plans.")
+            log.info("Generated %d plans.", len(plans))
             for p in plans:
-                print(f" - {p.get('test_id')}: {len(p.get('steps', []))} steps")
+                log.info(" - %s: %d steps", p.get("test_id"), len(p.get("steps", [])))
         except Exception as e:
-            print(f"Smoke test failed: {e}")
+            log.error("Smoke test failed: %s", e)
         finally:
             db.close()
 
