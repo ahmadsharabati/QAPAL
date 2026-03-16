@@ -2,14 +2,17 @@
 main.py — QAPal CLI
 =====================
 Coordinates crawl -> plan -> execute -> report.
+Also provides vision-enabled exploration and UX auditing.
 
 All config from environment variables. No config files.
 Copy .env.example to .env and fill in values.
 
 Commands:
-  python main.py crawl  --urls https://app.com/login https://app.com/dashboard
-  python main.py plan   --tests tests/tc001.json tests/tc002.json
-  python main.py run    --tests tests/tc001.json
+  python main.py crawl    --urls https://app.com/login https://app.com/dashboard
+  python main.py plan     --tests tests/tc001.json tests/tc002.json
+  python main.py run      --tests tests/tc001.json
+  python main.py explore  --url https://app.com --goal "Test the checkout flow"
+  python main.py ux-audit --urls https://app.com/login https://app.com/dashboard
   python main.py status
 
 Environment variables (see .env.example):
@@ -877,6 +880,176 @@ async def cmd_graph(args):
     return 0
 
 
+# ── Explore command ───────────────────────────────────────────────────
+
+async def cmd_explore(args):
+    """Autonomously explore an app using vision-guided navigation."""
+    from explorer import Explorer
+    from vision_client import VisionClient
+    from ux_report import generate_exploration_report
+
+    url  = args.url
+    goal = getattr(args, "goal", "") or "Explore the application and find UX issues"
+    db   = LocatorDB()
+    sg   = StateGraph(db)
+
+    ai = _get_ai_client()
+    try:
+        vision = VisionClient.from_env()
+    except EnvironmentError as e:
+        print(f"  Warning: Vision client not available ({e}) — using text-only exploration")
+        vision = None
+
+    headless    = bool(args.headless)
+    credentials = _load_credentials(args)
+    max_steps   = getattr(args, "max_steps", 30)
+
+    print(f"\n [explore] Starting autonomous exploration")
+    print(f"   URL:       {url}")
+    print(f"   Goal:      {goal}")
+    print(f"   Max steps: {max_steps}")
+    print(f"   Vision:    {'enabled' if vision else 'disabled (text-only)'}")
+
+    t0 = time.monotonic()
+    async with Explorer(
+        db, vision_client=vision, ai_client=ai,
+        headless=headless, credentials=credentials, state_graph=sg,
+    ) as explorer:
+        trace = await explorer.explore(url, goal=goal, max_steps=max_steps)
+
+    duration = int((time.monotonic() - t0) * 1000)
+
+    print(f"\n [explore] Exploration complete")
+    print(f"   Steps taken:   {len(trace.steps)}")
+    print(f"   Pages visited: {trace.pages_visited}")
+    print(f"   Vision calls:  {trace.vision_calls}")
+    print(f"   UX findings:   {len(trace.ux_findings)}")
+    print(f"   Duration:      {duration}ms")
+
+    # Severity breakdown
+    sev_counts = {"high": 0, "medium": 0, "low": 0}
+    for f in trace.ux_findings:
+        sev_counts[f.get("severity", "low")] = sev_counts.get(f.get("severity", "low"), 0) + 1
+    print(f"   Severity:      {sev_counts['high']} high, {sev_counts['medium']} medium, {sev_counts['low']} low")
+
+    # Print top findings
+    high_findings = [f for f in trace.ux_findings if f.get("severity") == "high"]
+    if high_findings:
+        print(f"\n   High-severity findings:")
+        for f in high_findings[:5]:
+            print(f"     - [{f.get('category', '?')}] {f.get('description', '')[:100]}")
+
+    # Generate report
+    html_path, json_path = generate_exploration_report(trace, output_dir="reports")
+    print(f"\n   report → {html_path}")
+    print(f"   json   → {json_path}")
+    print(f"   trace  → reports/exploration/{trace.session_id}/trace.json")
+
+    db.close()
+    return 0
+
+
+# ── UX Audit command ─────────────────────────────────────────────────
+
+async def cmd_ux_audit(args):
+    """Run UX heuristic evaluation on one or more URLs."""
+    from playwright.async_api import async_playwright
+    from ux_evaluator import UXEvaluator, UXAuditResult
+    from ux_report import generate_ux_report
+    from vision_client import VisionClient
+
+    urls = args.urls
+    if not urls:
+        print("No URLs provided. Use --urls https://...")
+        return 1
+
+    db = LocatorDB()
+    try:
+        vision = VisionClient.from_env()
+    except EnvironmentError:
+        vision = None
+
+    headless     = bool(args.headless)
+    credentials  = _load_credentials(args)
+    static_only  = getattr(args, "static", False)
+
+    evaluator = UXEvaluator(db, vision_client=vision)
+
+    print(f"\n [ux-audit] Auditing {len(urls)} URL(s)")
+    print(f"   Mode:   {'static (DB only)' if static_only else 'live (browser + vision)'}")
+    print(f"   Vision: {'enabled' if vision and not static_only else 'disabled'}")
+
+    t0           = time.monotonic()
+    all_findings = []
+    vision_calls = 0
+
+    if static_only:
+        # Static mode: only check what's in the DB
+        for url in urls:
+            findings = evaluator.audit_static(url)
+            all_findings.extend(findings)
+            print(f"   {url}: {len(findings)} finding(s)")
+    else:
+        # Live mode: open browser, run DOM + vision checks
+        async with async_playwright() as pw:
+            pw.selectors.set_test_id_attribute("data-test")
+            browser = await pw.chromium.launch(headless=headless)
+
+            for url in urls:
+                ctx  = await browser.new_context()
+                page = await ctx.new_page()
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                    await page.wait_for_timeout(1500)  # let SPA render
+
+                    # Capture screenshot for vision analysis
+                    screenshot_bytes = await page.screenshot(full_page=False)
+
+                    findings = await evaluator.audit_url(
+                        page, url=url, screenshot_bytes=screenshot_bytes,
+                    )
+                    all_findings.extend(findings)
+
+                    vision_count = sum(1 for f in findings if f.source == "vision")
+                    vision_calls += min(1, vision_count)  # 1 vision call per page
+                    rule_count   = sum(1 for f in findings if f.source == "rule")
+                    print(f"   {url}: {len(findings)} finding(s) ({rule_count} rule, {vision_count} vision)")
+
+                except Exception as e:
+                    print(f"   {url}: ERROR — {e}")
+                finally:
+                    await ctx.close()
+
+            await browser.close()
+
+    duration = int((time.monotonic() - t0) * 1000)
+    score    = UXEvaluator.compute_score(all_findings)
+
+    audit = UXAuditResult(
+        urls          = urls,
+        findings      = all_findings,
+        score         = score,
+        audited_at    = datetime.now(timezone.utc).isoformat(),
+        duration_ms   = duration,
+        vision_calls  = vision_calls,
+        pages_audited = len(urls),
+    )
+
+    sev = audit.severity_counts
+    print(f"\n [ux-audit] Audit complete")
+    print(f"   Score:    {score}/100 (Grade: {audit.grade})")
+    print(f"   Findings: {len(all_findings)} total ({sev['high']} high, {sev['medium']} medium, {sev['low']} low)")
+    print(f"   Duration: {duration}ms")
+
+    # Generate reports
+    html_path, json_path = generate_ux_report(audit, output_dir="reports")
+    print(f"\n   report → {html_path}")
+    print(f"   json   → {json_path}")
+
+    db.close()
+    return 0
+
+
 # ── Entry point ───────────────────────────────────────────────────────
 
 def main():
@@ -960,6 +1133,26 @@ def main():
     p.add_argument("--credentials-file", dest="credentials_file", metavar="FILE",
                    help="JSON file with login credentials")
 
+    # explore
+    p = sub.add_parser("explore", help="Autonomously explore an app with vision-guided navigation")
+    p.add_argument("--url", "-u", required=True, help="Starting URL to explore")
+    p.add_argument("--goal", "-g", default="Explore the application and find UX issues",
+                   help="Natural language goal for the exploration")
+    p.add_argument("--max-steps", dest="max_steps", type=int, default=30, metavar="N",
+                   help="Maximum exploration steps (default: 30)")
+    p.add_argument("--headless", "-H", action="store_true", help="Run browser in headless mode")
+    p.add_argument("--credentials-file", dest="credentials_file", metavar="FILE",
+                   help="JSON file with login credentials")
+
+    # ux-audit
+    p = sub.add_parser("ux-audit", help="Run UX heuristic evaluation on one or more URLs")
+    p.add_argument("--urls", "-u", nargs="+", required=True, help="URLs to audit")
+    p.add_argument("--headless", "-H", action="store_true", help="Run browser in headless mode")
+    p.add_argument("--credentials-file", dest="credentials_file", metavar="FILE",
+                   help="JSON file with login credentials")
+    p.add_argument("--static", action="store_true",
+                   help="Static audit only — use locator DB, no browser or vision")
+
     # status
     sub.add_parser("status", help="Show DB and AI client status")
 
@@ -999,6 +1192,10 @@ def main():
             return asyncio.run(cmd_graph_crawl(args))
         elif args.cmd == "compile":
             return asyncio.run(cmd_compile(args))
+        elif args.cmd == "explore":
+            return asyncio.run(cmd_explore(args))
+        elif args.cmd == "ux-audit":
+            return asyncio.run(cmd_ux_audit(args))
     except KeyboardInterrupt:
         print("\nInterrupted.")
         return 130
