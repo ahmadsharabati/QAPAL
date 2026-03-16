@@ -9,8 +9,9 @@
     {
       "action": "click",
       "selector": {
-        "strategy": "testid",
-        "value": "product-01KKS3KZVZYAVXF43J8V8V4WE0"
+        "strategy": "testid_prefix",
+        "value": "product-",
+        "index": 0
       }
     },
     {
@@ -22,20 +23,27 @@
           "name": "Add to cart"
         }
       }
+    },
+    {
+      "action": "click",
+      "selector": {
+        "strategy": "testid",
+        "value": "nav-cart"
+      }
     }
   ],
   "assertions": [
     {
       "type": "url_contains",
-      "value": "/product/",
+      "value": "https://practicesoftwaretesting.com/checkout",
       "_auto_fixed": true,
-      "_original_value": "/checkout"
+      "_original_value": "https://practicesoftwaretesting.com/checkout"
     }
   ],
   "_meta": {
     "source": "prd_generator",
-    "planned_at": "2026-03-15T16:48:10.412899+00:00",
-    "locators": 2593,
+    "planned_at": "2026-03-16T00:17:38.526225+00:00",
+    "locators": 2594,
     "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
   }
 }

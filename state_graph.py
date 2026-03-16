@@ -282,6 +282,7 @@ class StateGraph:
         trigger_label:    str,
         trigger_selector: Optional[dict] = None,
         session_id:       str = "",
+        page_change_type: str = "",
     ) -> None:
         """
         Upsert a transition edge.
@@ -311,20 +312,21 @@ class StateGraph:
                 )
             else:
                 self._table.insert({
-                    "id":              eid,
-                    "from_url":        from_url,
-                    "to_url":          to_url,
-                    "from_pattern":    _url_to_pattern(from_url),
-                    "to_pattern":      _url_to_pattern(to_url),
+                    "id":               eid,
+                    "from_url":         from_url,
+                    "to_url":           to_url,
+                    "from_pattern":     _url_to_pattern(from_url),
+                    "to_pattern":       _url_to_pattern(to_url),
                     "trigger": {
                         "action":   trigger_action,
                         "label":    trigger_label,
                         "selector": trigger_selector,
                     },
-                    "traversal_count": 1,
-                    "first_seen":      _now(),
-                    "last_seen":       _now(),
-                    "session_ids":     [session_id] if session_id else [],
+                    "page_change_type": page_change_type or ("navigation" if from_url != to_url else ""),
+                    "traversal_count":  1,
+                    "first_seen":       _now(),
+                    "last_seen":        _now(),
+                    "session_ids":      [session_id] if session_id else [],
                 })
 
     # ── Read ──────────────────────────────────────────────────────────

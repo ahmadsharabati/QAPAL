@@ -191,9 +191,24 @@ def _prune_list_items(locators: List[dict]) -> List[dict]:
     return result
 
 
+# UI widget testids that should never appear in test plans — they are persistent
+# floating elements (chat, cookie banners, etc.) that the AI tends to hallucinate clicks on.
+_WIDGET_TESTIDS = frozenset({
+    "chat-toggle", "chat-widget", "cookie-banner", "cookie-accept",
+    "cookie-consent", "cookie-close", "gdpr-accept", "gdpr-close",
+    "intercom-frame", "crisp-chatbox", "zendesk-widget",
+})
+
+
 def _format_locators(locators: List[dict], max_items: int = 100, group_by_url: bool = False) -> str:
     if not locators:
         return "(none — run crawler first)"
+
+    # Strip persistent UI widgets that pollute plans with irrelevant clicks
+    locators = [
+        loc for loc in locators
+        if loc.get("locators", {}).get("test_id") not in _WIDGET_TESTIDS
+    ]
 
     # Prune repeated list-item entries (same testid prefix with different ULIDs)
     locators = _prune_list_items(locators)

@@ -256,6 +256,69 @@ class _OpenAIClient(AIClient):
             self._client = OpenAI(**kwargs)
         return self._client
 
+    def _is_nonstandard_endpoint(self) -> bool:
+        """Returns True when base_url points to a custom path (e.g. /v1/chat)
+        that doesn't follow the standard /v1/chat/completions convention."""
+        if not self._base_url:
+            return False
+        from urllib.parse import urlparse
+        path = urlparse(self._base_url).path.rstrip("/")
+        # Standard OpenAI-compat base paths end with /v1 or just the host root
+        return path not in ("", "/v1", "/v1/") and not path.endswith("/v1")
+
+    def _complete_direct(
+        self,
+        messages:  list,
+        model:     str,
+        max_tokens: int,
+        temperature: float,
+    ) -> str:
+        """Direct HTTP POST for non-standard endpoints (e.g. Hypereal /v1/chat).
+        Handles both JSON and SSE streaming responses transparently."""
+        import httpx, json as _json
+        payload: dict = {"messages": messages, "max_tokens": max_tokens}
+        if model:
+            payload["model"] = model
+        if temperature != 0:
+            payload["temperature"] = temperature
+        resp = httpx.post(
+            self._base_url,  # type: ignore[arg-type]
+            headers={"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=120,
+        )
+        resp.raise_for_status()
+
+        content_type = resp.headers.get("content-type", "")
+        raw = resp.text.strip()
+
+        # SSE streaming response (lines starting with "data:")
+        if "text/event-stream" in content_type or raw.startswith("data:"):
+            chunks = []
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line.startswith("data:"):
+                    continue
+                payload_str = line[len("data:"):].strip()
+                if payload_str == "[DONE]":
+                    break
+                try:
+                    chunk = _json.loads(payload_str)
+                    # delta (streaming) or message (non-streaming) format
+                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                    msg   = chunk.get("choices", [{}])[0].get("message", {})
+                    chunks.append(delta.get("content") or msg.get("content") or "")
+                except Exception:
+                    pass
+            return "".join(chunks)
+
+        # Standard JSON response
+        try:
+            data = _json.loads(raw)
+            return data.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+        except Exception:
+            return raw
+
     def complete(
         self,
         prompt:         str,
@@ -264,18 +327,38 @@ class _OpenAIClient(AIClient):
         temperature:    float         = 0,
         model_override: Optional[str] = None,
     ) -> str:
-        client   = self._get()
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        response = client.chat.completions.create(
-            model       = model_override or self.model,
-            max_tokens  = max_tokens,
-            messages    = messages,
-            temperature = temperature,
+        model = model_override or self.model
+
+        # Non-standard endpoint (e.g. Hypereal /v1/chat) — bypass OpenAI SDK
+        if self._is_nonstandard_endpoint():
+            return self._complete_direct(messages, model, max_tokens, temperature)
+
+        client = self._get()
+        kwargs: dict = dict(
+            model      = model,
+            max_tokens = max_tokens,
+            messages   = messages,
         )
+        # Some reasoning models (NVIDIA nemotron, o1, o3) reject temperature=0
+        # or return None content when it's set. Pass it only when non-zero.
+        if temperature != 0:
+            kwargs["temperature"] = temperature
+
+        response = client.chat.completions.create(**kwargs)
         if not response.choices:
             return ""
-        return response.choices[0].message.content or ""
+        content = response.choices[0].message.content
+        # Reasoning models may put the answer in reasoning_content or reasoning when content is None
+        if not content:
+            msg = response.choices[0].message
+            content = (
+                getattr(msg, "reasoning_content", None)
+                or getattr(msg, "reasoning", None)
+                or ""
+            )
+        return content or ""

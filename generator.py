@@ -134,21 +134,23 @@ class TestGenerator:
 
     def __init__(
         self,
-        db:             LocatorDB,
-        ai_client:      Optional[AIClient] = None,
-        max_locators:   int                = 80,
-        max_cases:      bool               = False,
-        state_graph                        = None,
-        num_tests:      Optional[int]      = None,
-        negative_tests: bool               = False,
+        db:                   LocatorDB,
+        ai_client:            Optional[AIClient] = None,
+        max_locators:         int                = 80,
+        max_cases:            bool               = False,
+        state_graph                              = None,
+        num_tests:            Optional[int]      = None,
+        negative_tests:       bool               = False,
+        compiled_model_path:  Optional[str]      = None,
     ):
-        self._db             = db
-        self._ai             = ai_client
-        self._max_locators   = max_locators
-        self._max_cases      = max_cases
-        self._state_graph    = state_graph
-        self._num_tests      = num_tests  # explicit count; overrides max_cases/default-5
-        self._negative_tests = negative_tests
+        self._db                  = db
+        self._ai                  = ai_client
+        self._max_locators        = max_locators
+        self._max_cases           = max_cases
+        self._state_graph         = state_graph
+        self._num_tests           = num_tests  # explicit count; overrides max_cases/default-5
+        self._negative_tests      = negative_tests
+        self._compiled_model_path = compiled_model_path
 
     def generate_plans_from_prd(self, prd_content: str, urls: List[str], credentials: Optional[dict] = None) -> List[dict]:
         """
@@ -295,17 +297,31 @@ class TestGenerator:
         else:
             creds_section = "  (no credentials provided — use placeholder values for login tests)"
 
+        # Use compiled model when available and fresh — dramatically reduces token usage
+        compiled_locators_text = None
+        if self._compiled_model_path:
+            try:
+                from site_compiler import SiteCompiler
+                model = SiteCompiler.load(self._compiled_model_path)
+                if model and not model.is_stale(max_age_minutes=120):
+                    compiled_locators_text = model.format_for_prompt()
+                    print(f"  [compile] Using compiled model ({model.locator_count} locators → ~{len(compiled_locators_text)//4} tokens)")
+            except Exception as e:
+                print(f"  [compile] Compiled model load failed, using raw locators: {e}")
+
+        locators_section = compiled_locators_text or _format_locators(locators, self._max_locators, group_by_url=True)
+
         prompt = _GENERATOR_PROMPT.format(
             base_urls           = "\n".join(f"  - {u}" for u in urls),
             credentials_section = creds_section,
             prd_content         = prd_content + instruction,
             semantic_contexts   = _format_semantic_contexts(states),
             navigation_graph    = nav_graph,
-            locators            = _format_locators(locators, self._max_locators, group_by_url=True),
+            locators            = locators_section,
         )
 
         try:
-            raw = self._ai.complete(prompt, system_prompt=_GENERATOR_SYSTEM, max_tokens=8192, temperature=0)
+            raw = self._ai.complete(prompt, system_prompt=_GENERATOR_SYSTEM, max_tokens=4096, temperature=0)
         except Exception as e:
             raise PlanningError(f"AI call failed: {e}")
 
@@ -386,7 +402,8 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
 
         try:
             raw = self._ai.complete(prompt, system_prompt=self._NEGATIVE_SYSTEM, max_tokens=4096, temperature=0)
-        except Exception:
+        except Exception as e:
+            print(f"  ⚠ negative test generation skipped: {e}")
             return []
 
         try:
@@ -398,7 +415,8 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
                     "boundary" if p.get("test_id", "").endswith("_boundary") else "negative"
                 )
             return neg_plans
-        except Exception:
+        except Exception as e:
+            print(f"  ⚠ negative test parsing failed: {e}")
             return []
 
     def _validate_plan_with_small_model(self, plan: dict, locators: list) -> dict:
@@ -1230,6 +1248,10 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
 
     def _parse_plans(self, text: str, locator_map: dict, base_url: str = "", credentials: Optional[dict] = None, locators: Optional[list] = None) -> List[dict]:
         text = text.strip()
+        # Strip <think>...</think> reasoning blocks emitted by reasoning models
+        # (NVIDIA nemotron, MiniMax, DeepSeek-R1, etc.)
+        import re as _re
+        text = _re.sub(r"<think>.*?</think>", "", text, flags=_re.DOTALL).strip()
         if "```" in text:
             parts = text.split("```")
             for part in parts[1:]:

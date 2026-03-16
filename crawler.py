@@ -616,7 +616,22 @@ async def crawl_page(
         d for d in db.get_all(url, valid_only=False)
         if not d.get("history", {}).get("valid", True)
     ])
-    db.upsert_page(url, len(all_elements))
+
+    # Screenshot this page for visual state inspection
+    screenshot_path = ""
+    try:
+        import hashlib
+        from pathlib import Path as _Path
+        shot_dir = _Path(os.getenv("QAPAL_STATE_SCREENSHOTS", "reports/states"))
+        shot_dir.mkdir(parents=True, exist_ok=True)
+        slug = hashlib.md5(url.encode()).hexdigest()[:12]
+        shot_file = shot_dir / f"{slug}.png"
+        await page.screenshot(path=str(shot_file), full_page=False)
+        screenshot_path = str(shot_file)
+    except Exception:
+        pass  # non-fatal
+
+    db.upsert_page(url, len(all_elements), screenshot_path=screenshot_path)
 
     # Cascade-refresh: if this URL is a known sample_url, push updated locators
     # to all pages that previously inherited from it.
@@ -817,6 +832,11 @@ class Crawler:
                 return False
             pat = _url_pattern(norm)
             if pat in visited_patterns:
+                return False
+            # Skip URLs already in the locator DB from a previous run (cross-run dedup)
+            if not force and self._db.get_all(norm, valid_only=True):
+                visited_urls.add(norm)
+                visited_patterns.add(pat)
                 return False
             visited_urls.add(norm)
             visited_patterns.add(pat)

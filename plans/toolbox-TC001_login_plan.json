@@ -40,8 +40,8 @@
   ],
   "_meta": {
     "source": "prd_generator",
-    "planned_at": "2026-03-15T16:48:10.412842+00:00",
-    "locators": 2593,
+    "planned_at": "2026-03-16T00:17:38.526208+00:00",
+    "locators": 2594,
     "ai_model": "meta-llama/llama-4-scout-17b-16e-instruct"
   }
 }

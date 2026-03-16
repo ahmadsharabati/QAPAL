@@ -806,7 +806,15 @@ async def _execute_step(
             ss = await _screenshot(page, f"not_actionable_{action}")
             return _step_fail(step, f"Not actionable: {reason}", ss), page_url
 
-    url_before = _normalize_url(page.url)
+    url_before  = _normalize_url(page.url)
+    _snap_before: list = []
+    if action == "click" and state_graph is not None:
+        try:
+            _snap_before = await page.accessibility.snapshot() or []
+            if isinstance(_snap_before, dict):
+                _snap_before = [_snap_before]
+        except Exception:
+            _snap_before = []
 
     try:
         if action == "click":
@@ -966,6 +974,16 @@ async def _execute_step(
     if new_url != url_before:
         await crawler.on_page_load(page, new_url)
         if state_graph is not None:
+            pct = "navigation"
+            if action == "click" and _snap_before:
+                try:
+                    from state_graph import classify_page_change
+                    _snap_after: list = await page.accessibility.snapshot() or []
+                    if isinstance(_snap_after, dict):
+                        _snap_after = [_snap_after]
+                    pct = classify_page_change(_snap_before, _snap_after, url_before, new_url)
+                except Exception:
+                    pct = "navigation"
             state_graph.record_transition(
                 from_url         = url_before,
                 to_url           = new_url,
@@ -973,6 +991,7 @@ async def _execute_step(
                 trigger_label    = _trigger_label(step),
                 trigger_selector = selector,
                 session_id       = session_id,
+                page_change_type = pct,
             )
 
     return _step_pass(step, strategy=strategy), new_url
@@ -1507,6 +1526,35 @@ class Executor:
             "visual_regressions":    visual_regressions,
             "has_visual_regressions": bool(visual_regressions),
         }
+
+    async def run_parallel(self, plans: list, concurrency: int = 3) -> list:
+        """
+        Run multiple plans concurrently, up to `concurrency` at a time.
+        Returns results in the same order as `plans`.
+        Prints live status as each test completes.
+        """
+        semaphore  = asyncio.Semaphore(concurrency)
+        print_lock = asyncio.Lock()
+
+        async def _one(plan: dict) -> dict:
+            tc_id = plan.get("test_id") or plan.get("id") or "?"
+            async with semaphore:
+                result = await self.run(plan)
+            async with print_lock:
+                icon = "✓" if result["status"] == "pass" else "✗"
+                print(f"  {tc_id} {icon} {result['status']}  ({result['duration_ms']}ms)")
+                if result["status"] == "fail":
+                    for s in result.get("steps", []):
+                        if s.get("status") == "fail":
+                            print(f"    step fail: {s.get('reason')}")
+                    for a in result.get("assertions", []):
+                        if a.get("status") == "fail":
+                            print(f"    assert fail: {a.get('reason')}")
+            return result
+
+        return list(await asyncio.gather(*(_one(p) for p in plans)))
+
+
 # ── Standalone Testing ────────────────────────────────────────────────
 
 if __name__ == "__main__":

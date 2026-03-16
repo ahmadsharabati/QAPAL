@@ -300,22 +300,25 @@ class LocatorDB:
         url = _normalize_url(url)
         return self._pages.get(self._Q.url == url)
 
-    def upsert_page(self, url: str, element_count: int) -> None:
+    def upsert_page(self, url: str, element_count: int, screenshot_path: str = "") -> None:
         url = _normalize_url(url)
         now = _now()
         with self._lock:
             if self._pages.get(self._Q.url == url):
-                self._pages.update(
-                    {"last_crawled": now, "element_count": element_count},
-                    self._Q.url == url,
-                )
+                update = {"last_crawled": now, "element_count": element_count}
+                if screenshot_path:
+                    update["screenshot_path"] = screenshot_path
+                self._pages.update(update, self._Q.url == url)
             else:
-                self._pages.insert({
+                doc = {
                     "url":           url,
                     "domain":        _domain(url),
                     "last_crawled":  now,
                     "element_count": element_count,
-                })
+                }
+                if screenshot_path:
+                    doc["screenshot_path"] = screenshot_path
+                self._pages.insert(doc)
 
     def all_pages(self) -> List[dict]:
         return self._pages.all()
