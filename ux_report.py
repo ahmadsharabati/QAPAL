@@ -291,7 +291,9 @@ def _build_html(audit_result, trace=None) -> str:
         for f in page_findings:
             thumb = ""
             if f.screenshot_path and Path(f.screenshot_path).exists():
-                thumb = f'<img class="finding-thumb" src="{_esc(f.screenshot_path)}" alt="screenshot"/>'
+                # Use file:// URI so the report works when opened in a browser
+                abs_path = Path(f.screenshot_path).resolve()
+                thumb = f'<img class="finding-thumb" src="file://{_esc(str(abs_path))}" alt="screenshot"/>'
 
             cards_html += (
                 f'<div class="finding-card sev-{_esc(f.severity)}">'
@@ -324,9 +326,9 @@ def _build_html(audit_result, trace=None) -> str:
     subtitle = f"{total} findings across {audit_result.pages_audited} page(s)"
     if trace:
         subtitle += f" · Exploration: {len(trace.steps)} steps"
-    duration_str = f"{audit_result.duration_ms // 1000}s" if audit_result.duration_ms else "—"
+    duration_str = f"{round(audit_result.duration_ms / 1000)}s" if audit_result.duration_ms else "—"
 
-    return Template(_UX_REPORT_TEMPLATE).substitute(
+    return Template(_UX_REPORT_TEMPLATE).safe_substitute(
         title          = f"Score {audit_result.score} ({audit_result.grade})",
         grade          = audit_result.grade,
         subtitle       = subtitle,

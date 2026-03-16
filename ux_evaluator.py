@@ -141,21 +141,30 @@ _UX_AUDIT_JS = r"""
 
     // Check for images without alt text
     document.querySelectorAll('img').forEach(img => {
-        if (!img.alt && !img.getAttribute('role') && img.offsetWidth > 1) {
-            results.missing_alt_text.push({
-                src: img.src ? img.src.substring(0, 100) : '',
-                selector: img.getAttribute('data-testid')
-                    ? `[data-testid="${img.getAttribute('data-testid')}"]`
-                    : `img[src*="${(img.src||'').split('/').pop().substring(0,30)}"]`,
-            });
+        const altAttr = img.getAttribute('alt');
+        const role = img.getAttribute('role');
+        // alt="" is intentional for decorative images; role="presentation"/"none" also marks decorative
+        const isDecorative = altAttr === '' || role === 'presentation' || role === 'none';
+        if (altAttr === null && !isDecorative && img.offsetWidth > 1) {
+            const testid = img.getAttribute('data-testid');
+            // Safely build selector — avoid injecting raw src into CSS selector
+            let selector;
+            if (testid) {
+                selector = `[data-testid="${testid.replace(/"/g, '\\"')}"]`;
+            } else {
+                const filename = (img.src || '').split('/').pop().substring(0, 30).replace(/["\]\\]/g, '');
+                selector = filename ? `img[src*="${filename}"]` : 'img';
+            }
+            results.missing_alt_text.push({ src: img.src ? img.src.substring(0, 100) : '', selector });
         }
     });
 
     // Check for small tap targets
+    const minTap = __MIN_TAP_TARGET__;
     document.querySelectorAll('button, a, input, select, [role="button"], [role="link"]').forEach(el => {
         const rect = el.getBoundingClientRect();
         if (rect.width > 0 && rect.height > 0 &&
-            (rect.width < 44 || rect.height < 44) &&
+            (rect.width < minTap || rect.height < minTap) &&
             el.offsetParent !== null) {
             results.small_tap_targets.push({
                 tag: el.tagName.toLowerCase(),
@@ -275,7 +284,8 @@ class UXEvaluator:
 
         # Layer 1: DOM-based rule checks
         try:
-            dom_results = await page.evaluate(_UX_AUDIT_JS)
+            js = _UX_AUDIT_JS.replace("__MIN_TAP_TARGET__", str(int(MIN_TAP_TARGET)))
+            dom_results = await page.evaluate(js)
             findings.extend(self._evaluate_dom_results(dom_results, url))
         except Exception as e:
             findings.append(UXFinding(
@@ -483,11 +493,18 @@ Respond with ONLY valid JSON:
                 max_tokens=2048,
             )
             data = json.loads(_extract_json(raw))
+            valid_severities = {"high", "medium", "low"}
             findings = []
             for f in data.get("findings", []):
+                severity = f.get("severity", "low")
+                if severity not in valid_severities:
+                    severity = "low"
+                heuristic = f.get("heuristic", "N8_AESTHETIC")
+                if heuristic not in HEURISTICS:
+                    heuristic = "N8_AESTHETIC"
                 findings.append(UXFinding(
-                    heuristic   = f.get("heuristic", "N8_AESTHETIC"),
-                    severity    = f.get("severity", "low"),
+                    heuristic   = heuristic,
+                    severity    = severity,
                     category    = f.get("category", "layout"),
                     description = f.get("description", ""),
                     url         = url,
@@ -495,8 +512,11 @@ Respond with ONLY valid JSON:
                     source      = "vision",
                 ))
             return findings
-        except Exception:
-            return []
+        except Exception as e:
+            return [UXFinding(
+                heuristic="N1_VISIBILITY", severity="low", category="errors",
+                description=f"Vision audit failed: {e}", url=url, source="vision",
+            )]
 
     # ── Scoring ──────────────────────────────────────────────────────
 
@@ -513,14 +533,40 @@ Respond with ONLY valid JSON:
 # ── Helpers ──────────────────────────────────────────────────────────
 
 def _extract_json(text: str) -> str:
-    """Extract JSON from text that may contain markdown fences."""
+    """Extract JSON object from text that may contain markdown fences."""
     text = text.strip()
     if text.startswith("```"):
         lines = text.split("\n")
         lines = [l for l in lines if not l.strip().startswith("```")]
         text  = "\n".join(lines)
+    # Find the first '{' and match its closing '}' by tracking brace depth
     start = text.find("{")
-    end   = text.rfind("}")
-    if start != -1 and end != -1:
+    if start == -1:
+        return text
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if escape:
+            escape = False
+            continue
+        if c == '\\' and in_string:
+            escape = True
+            continue
+        if c == '"' and not escape:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    # Fallback: use first { to last }
+    end = text.rfind("}")
+    if end != -1:
         return text[start:end + 1]
     return text

@@ -230,7 +230,7 @@ class Explorer:
         page = await ctx.new_page()
 
         visited_states: set = set()   # (url_pattern, dom_hash) pairs
-        depth = 0
+        url_stack: list = []         # tracks navigation depth via URL changes
 
         try:
             # Initial navigation
@@ -269,8 +269,10 @@ class Explorer:
                     trace.ux_findings.extend(page_findings)
 
                 # Decide next action
+                vision_remaining = VISION_BUDGET - trace.vision_calls
                 action_decision = await self._decide_next_action(
                     page, shot_path, a11y_summary, trace.steps, goal, step_idx,
+                    use_vision=(vision_remaining > 0),
                 )
                 trace.vision_calls += 1 if action_decision.get("_used_vision") else 0
 
@@ -307,15 +309,19 @@ class Explorer:
                 except Exception as e:
                     step.observation += f" | Action failed: {e}"
 
-                # Track navigation depth
+                # Track navigation depth via URL stack
                 new_url = _normalize_url(page.url)
                 if new_url != current_url:
-                    depth += 1
                     trace.pages_visited += 1
                     # Crawl newly discovered pages
                     await crawl_page(page, new_url, self._db, state_graph=self._sg)
+                    # Update depth stack: if we navigated back, pop; otherwise push
+                    if url_stack and new_url == url_stack[-1]:
+                        url_stack.pop()
+                    else:
+                        url_stack.append(current_url)
 
-                if depth > max_depth:
+                if len(url_stack) > max_depth:
                     break
 
         except Exception as e:
@@ -351,6 +357,8 @@ class Explorer:
         """Compact text summary of interactive elements for the VLM prompt."""
         lines = []
         for el in elements[:40]:  # cap to avoid prompt bloat
+            if not isinstance(el, dict):
+                continue
             role = el.get("role", "?")
             name = el.get("name", "")
             tid  = (el.get("loc") or {}).get("testid", "")
@@ -410,6 +418,7 @@ class Explorer:
         history:       list[ExplorationStep],
         goal:          str,
         step_index:    int,
+        use_vision:    bool = True,
     ) -> dict:
         """Use VLM or AI to decide the next exploration action."""
 
@@ -425,7 +434,7 @@ class Explorer:
         )
 
         # Prefer vision if available and within budget
-        if self._vision:
+        if self._vision and use_vision:
             try:
                 shot_bytes = Path(screenshot_path).read_bytes()
                 raw = await self._vision.aanalyze_screenshot(
@@ -496,10 +505,13 @@ class Explorer:
             target = line.strip()
             if target not in visited_targets:
                 if "[link]" in target or "[button]" in target:
+                    # Safely extract quoted name; fall back to full target text
+                    parts = target.split('"')
+                    text_value = parts[1] if len(parts) >= 3 else target
                     return {
                         "action":   "click",
                         "target":   target,
-                        "selector": {"strategy": "text", "value": target.split('"')[1] if '"' in target else target},
+                        "selector": {"strategy": "text", "value": text_value},
                         "reasoning": "Heuristic: clicking next unvisited element",
                         "_used_vision": False,
                     }

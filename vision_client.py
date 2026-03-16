@@ -53,7 +53,10 @@ class VisionClient:
         temperature:    float         = 0,
     ) -> str:
         """Analyze a single screenshot with a text prompt. Returns raw text."""
-        raise NotImplementedError
+        raise NotImplementedError(
+            f"{type(self).__name__}.analyze_screenshot() not implemented. "
+            "Use VisionClient.from_env() to get a provider-specific client."
+        )
 
     def analyze_multi(
         self,
@@ -64,7 +67,10 @@ class VisionClient:
         temperature:    float         = 0,
     ) -> str:
         """Analyze multiple screenshots in a single call (e.g. before/after)."""
-        raise NotImplementedError
+        raise NotImplementedError(
+            f"{type(self).__name__}.analyze_multi() not implemented. "
+            "Use VisionClient.from_env() to get a provider-specific client."
+        )
 
     # ── Async wrapper ─────────────────────────────────────────────────
 
