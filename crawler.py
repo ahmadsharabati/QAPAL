@@ -833,11 +833,24 @@ class Crawler:
             pat = _url_pattern(norm)
             if pat in visited_patterns:
                 return False
-            # Skip URLs already in the locator DB from a previous run (cross-run dedup)
+            # Skip URLs already in the locator DB from a previous run, but only
+            # if their data is still fresh (respects CRAWLER_STALE_MINUTES).
             if not force and self._db.get_all(norm, valid_only=True):
-                visited_urls.add(norm)
-                visited_patterns.add(pat)
-                return False
+                page_info = self._db.get_page(norm)
+                if page_info:
+                    stale_min = int(os.getenv("CRAWLER_STALE_MINUTES", "60"))
+                    last = page_info.get("last_crawled", "")
+                    if last:
+                        from datetime import datetime, timezone
+                        try:
+                            ts  = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                            age = (datetime.now(timezone.utc) - ts).total_seconds() / 60
+                            if age < stale_min:
+                                visited_urls.add(norm)
+                                visited_patterns.add(pat)
+                                return False
+                        except Exception:
+                            pass
             visited_urls.add(norm)
             visited_patterns.add(pat)
             all_urls.append(norm)

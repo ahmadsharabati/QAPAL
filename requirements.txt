@@ -18,3 +18,6 @@ crawl4ai>=0.3.0
 
 # Visual regression diffing (optional — only needed when QAPAL_VISUAL_REGRESSION=true)
 Pillow>=10.0.0
+
+# HTTP client for non-standard AI endpoints (optional — only needed with custom QAPAL_AI_BASE_URL)
+httpx>=0.25.0

@@ -321,7 +321,8 @@ class TestGenerator:
         )
 
         try:
-            raw = self._ai.complete(prompt, system_prompt=_GENERATOR_SYSTEM, max_tokens=4096, temperature=0)
+            plan_max_tokens = 4096 if compiled_locators_text else 8192
+            raw = self._ai.complete(prompt, system_prompt=_GENERATOR_SYSTEM, max_tokens=plan_max_tokens, temperature=0)
         except Exception as e:
             raise PlanningError(f"AI call failed: {e}")
 

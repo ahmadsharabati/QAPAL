@@ -133,6 +133,15 @@ class ActionMiner:
         actions += self._mine_nav(url, links)
         actions += self._mine_lists(url, locators)
 
+        # Deduplicate action names — append _2, _3, etc. on collision
+        seen: dict = {}
+        for a in actions:
+            if a.name in seen:
+                seen[a.name] += 1
+                a.name = f"{a.name}_{seen[a.name]}"
+            else:
+                seen[a.name] = 1
+
         return actions
 
     # ── Input detection ──────────────────────────────────────────────────
@@ -196,7 +205,7 @@ class ActionMiner:
             return "register"
         if "search" in ctx:
             return "search"
-        if any(k in ctx for k in ("checkout", "payment", "billing", "address")):
+        if any(k in ctx for k in ("checkout", "payment", "billing")):
             return "checkout"
         if any(k in ctx for k in ("contact", "message", "enquiry")):
             return "contact"
