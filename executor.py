@@ -44,12 +44,16 @@ from playwright.async_api import (
 from locator_db import LocatorDB, _normalize_url
 from crawler import Crawler, _build_context, wait_for_stable
 from state_graph import StateGraph
+from _log import get_logger
+from _tokens import get_token_tracker
 
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     pass
+
+log = get_logger("executor")
 
 
 # ── Config ────────────────────────────────────────────────────────────
@@ -280,6 +284,14 @@ def _resolve_frame(page: Page, frame_key: Optional[str]):
     return page
 
 
+async def _safe_count(loc) -> int:
+    """Call loc.count() safely — returns 0 on Playwright parse/selector errors (e.g. invalid CSS)."""
+    try:
+        return await loc.count()
+    except Exception:
+        return 0
+
+
 def _build_locator(ctx, selector: dict) -> Optional[Locator]:
     """Build a Playwright Locator from a selector dict. Returns None on bad input."""
     if not selector:
@@ -394,7 +406,7 @@ async def resolve_locator(
                         await cloc.first.wait_for(state="attached", timeout=10000)
                     except Exception:
                         pass
-                    ccount = await cloc.count()
+                    ccount = await _safe_count(cloc)
                     if ccount >= 1:
                         return (cloc if ccount == 1 else cloc.first), f"db:{chain_sel.get('strategy')}"
 
@@ -407,7 +419,7 @@ async def resolve_locator(
             await loc.first.wait_for(state="attached", timeout=10000)
         except Exception:
             pass
-        count = await loc.count()
+        count = await _safe_count(loc)
         if count == 1:
             # Update DB uniqueness
             element_id = selector.get("element_id")
@@ -422,7 +434,7 @@ async def resolve_locator(
             container = selector.get("container")
             if container:
                 scoped = ctx.locator(container).locator(loc)
-                if await scoped.count() == 1:
+                if await _safe_count(scoped) == 1:
                     return scoped, f"{selector.get('strategy')}+container"
             # Return first — executor continues, assertion may catch wrong element
             return loc.first, f"{selector.get('strategy')} (first of {count})"
@@ -458,7 +470,7 @@ async def resolve_locator(
     if fallback:
         loc = _build_locator(ctx, fallback)
         if loc is not None:
-            count = await loc.count()
+            count = await _safe_count(loc)
             if count >= 1:
                 return loc.first, f"fallback:{fallback.get('strategy')}"
 
@@ -533,7 +545,7 @@ Valid strategies: role, testid, css, label, placeholder, aria-label"""
 
         new_sel = json.loads(text)
         loc     = _build_locator(page, new_sel)
-        if loc and await loc.count() >= 1:
+        if loc and await _safe_count(loc) >= 1:
             db.mark_ai_rediscovered(
                 url       = page_url,
                 role      = role,
@@ -1296,15 +1308,15 @@ class Executor:
             from semantic_extractor import extract_semantic_context
             from replanner import Replanner, ReplanningError
 
-            print(f"    [recovery] unknown state at {current_url}")
+            log.warning("recovery: unknown state at %s", current_url)
 
             # 1. Extract semantic context from live page (no navigation)
             semantic_ctx = await extract_semantic_context(page, current_url)
             page_name    = semantic_ctx.get("page", "")
             buttons      = semantic_ctx.get("buttons", [])
             headings     = semantic_ctx.get("headings", [])
-            print(f"    [recovery] extracted context: page={page_name!r}  "
-                  f"buttons={buttons[:3]}  headings={headings[:3]}")
+            log.debug("recovery: context page=%r  buttons=%s  headings=%s",
+                      page_name, buttons[:3], headings[:3])
 
             # 2. Persist new state fingerprint + context
             self._db.upsert_state(current_url, dom_hash, semantic_ctx)
@@ -1312,13 +1324,14 @@ class Executor:
             # 3. Update locators for this URL from live page
             await self._crawler.on_page_load(page, current_url)
             locator_count = len(self._db.get_all(current_url, valid_only=True))
-            print(f"    [recovery] live locators extracted: {locator_count}")
+            log.debug("recovery: live locators extracted: %d", locator_count)
 
             # 4. Pull fresh locators to give the replanner accurate context
             available_locators = self._db.get_all(current_url, valid_only=True)
 
             # 5. Replan — returns step patch only
-            print(f"    [recovery] calling replanner for {len(remaining_steps)} remaining step(s)...")
+            log.warning("recovery: calling replanner for %d remaining step(s)...",
+                        len(remaining_steps))
             replanner = Replanner(self._ai_client)
             patch = await replanner.replan(
                 execution_history   = execution_history,
@@ -1329,11 +1342,15 @@ class Executor:
                 available_locators  = available_locators,
                 original_assertions = original_assertions,
             )
-            print(f"    [recovery] replanner generated {len(patch)} replacement step(s)")
+            log.info("recovery: replanner generated %d replacement step(s)", len(patch))
+            # Log token usage incurred by the recovery call
+            tok = get_token_tracker().format_line("recovery")
+            if tok:
+                log.info(tok)
             return patch
 
         except Exception as e:
-            print(f"    [recovery] failed: {e}")
+            log.error("recovery: failed: %s", e)
             return None
 
     async def run(self, test_case: dict) -> dict:
@@ -1534,22 +1551,23 @@ class Executor:
         Prints live status as each test completes.
         """
         semaphore  = asyncio.Semaphore(concurrency)
-        print_lock = asyncio.Lock()
+        log_lock   = asyncio.Lock()
 
         async def _one(plan: dict) -> dict:
             tc_id = plan.get("test_id") or plan.get("id") or "?"
             async with semaphore:
                 result = await self.run(plan)
-            async with print_lock:
+            async with log_lock:
                 icon = "✓" if result["status"] == "pass" else "✗"
-                print(f"  {tc_id} {icon} {result['status']}  ({result['duration_ms']}ms)")
+                log.info("  %s %s %s  (%dms)",
+                         tc_id, icon, result["status"], result["duration_ms"])
                 if result["status"] == "fail":
                     for s in result.get("steps", []):
                         if s.get("status") == "fail":
-                            print(f"    step fail: {s.get('reason')}")
+                            log.error("    step fail: %s", s.get("reason"))
                     for a in result.get("assertions", []):
                         if a.get("status") == "fail":
-                            print(f"    assert fail: {a.get('reason')}")
+                            log.error("    assert fail: %s", a.get("reason"))
             return result
 
         return list(await asyncio.gather(*(_one(p) for p in plans)))
@@ -1563,16 +1581,16 @@ if __name__ == "__main__":
         db = LocatorDB()
         try:
             async with Executor(db, headless=True) as exc:
-                print("Executor initialized. Running smoke test...")
+                log.info("Executor initialized. Running smoke test...")
                 plan = {
                     "id": "smoke",
                     "steps": [{"action": "navigate", "url": "https://example.com"}],
                     "assertions": [{"type": "title_contains", "value": "Example Domain"}]
                 }
                 result = await exc.run(plan)
-                print(f"Result: {result['status']}")
+                log.info("Result: %s", result["status"])
         except Exception as e:
-            print(f"Smoke test failed: {e}")
+            log.error("Smoke test failed: %s", e)
         finally:
             db.close()
 

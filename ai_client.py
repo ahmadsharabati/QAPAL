@@ -24,6 +24,11 @@ import asyncio
 import os
 from typing import Optional
 
+from _log import get_logger
+from _tokens import get_token_tracker
+
+_log = get_logger("ai_client")
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -222,6 +227,16 @@ class _AnthropicClient(AIClient):
         response = client.messages.create(**kwargs)
         if not response.content:
             return ""
+        # Record token usage
+        usage = getattr(response, "usage", None)
+        if usage:
+            get_token_tracker().record(
+                in_tok     = getattr(usage, "input_tokens", 0),
+                out_tok    = getattr(usage, "output_tokens", 0),
+                cache_read = getattr(usage, "cache_read_input_tokens", 0),
+                model      = kwargs.get("model", self.model),
+                phase      = "ai",
+            )
         return response.content[0].text
 
 
@@ -349,4 +364,13 @@ class _OpenAIClient(AIClient):
         response = client.chat.completions.create(**kwargs)
         if not response.choices:
             return ""
+        # Record token usage
+        usage = getattr(response, "usage", None)
+        if usage:
+            get_token_tracker().record(
+                in_tok  = getattr(usage, "prompt_tokens", 0),
+                out_tok = getattr(usage, "completion_tokens", 0),
+                model   = model,
+                phase   = "ai",
+            )
         return response.choices[0].message.content or ""
