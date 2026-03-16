@@ -136,6 +136,7 @@ _HTML_REPORT_TEMPLATE = """\
 
 def _write_html_report(json_report_path: Path, results: list, summary: dict) -> Path:
     """Generate an HTML report alongside the JSON report. No extra dependencies."""
+    from html import escape as _esc
     from string import Template
 
     rows_html = []
@@ -143,8 +144,8 @@ def _write_html_report(json_report_path: Path, results: list, summary: dict) -> 
         status   = r.get("status", "?")
         badge    = "pass" if status == "pass" else "fail"
         dur      = f"{r.get('duration_ms', 0)}ms"
-        test_id  = r.get("id") or r.get("test_id", "?")
-        name     = r.get("name", test_id)
+        test_id  = _esc(str(r.get("id") or r.get("test_id", "?")))
+        name     = _esc(str(r.get("name", test_id)))
 
         fail_steps = [s for s in r.get("steps", [])      if s.get("status") == "fail"]
         fail_asserts = [a for a in r.get("assertions", []) if a.get("status") == "fail"]
@@ -153,10 +154,10 @@ def _write_html_report(json_report_path: Path, results: list, summary: dict) -> 
 
         detail_parts = []
         if fail_steps:
-            items = "".join(f'<li class="fail">{s.get("reason","?")[:120]}</li>' for s in fail_steps[:5])
+            items = "".join(f'<li class="fail">{_esc(str(s.get("reason","?"))[:120])}</li>' for s in fail_steps[:5])
             detail_parts.append(f'<ul class="steps">{items}</ul>')
         if fail_asserts:
-            items = "".join(f'<li class="fail">{a.get("reason","?")[:120]}</li>' for a in fail_asserts[:5])
+            items = "".join(f'<li class="fail">{_esc(str(a.get("reason","?"))[:120])}</li>' for a in fail_asserts[:5])
             detail_parts.append(f'<ul class="steps">{items}</ul>')
         pe_count = len(passive.get("console_errors", [])) + len(passive.get("network_failures", []))
         if pe_count:

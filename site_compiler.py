@@ -65,6 +65,8 @@ def _group_by_page(locators: list) -> dict:
             continue
         if not (loc.get("locators") or {}).get("actionable", True):
             continue
+        # Normalize trailing slash to avoid duplicate pages (e.g. /foo vs /foo/)
+        url = url.rstrip("/") if url != "/" else url
         groups[url].append(loc)
     return dict(groups)
 
@@ -240,14 +242,18 @@ class SiteCompiler:
         return "_".join(parts[-2:]).replace("-", "_")
 
     def _action_to_dict(self, action: Action) -> dict:
+        seen_names: set = set()
+        deduped = []
+        for p in action.params:
+            if p.name in seen_names:
+                continue
+            seen_names.add(p.name)
+            deduped.append({
+                "name":     p.name,
+                "action":   p.action,
+                "selector": _sel_str(p.selector),
+            })
         return {
             "name":   action.name,
-            "params": [
-                {
-                    "name":     p.name,
-                    "action":   p.action,
-                    "selector": _sel_str(p.selector),
-                }
-                for p in action.params
-            ],
+            "params": deduped,
         }

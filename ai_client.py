@@ -340,25 +340,13 @@ class _OpenAIClient(AIClient):
 
         client = self._get()
         kwargs: dict = dict(
-            model      = model,
-            max_tokens = max_tokens,
-            messages   = messages,
+            model       = model,
+            max_tokens  = max_tokens,
+            messages    = messages,
+            temperature = temperature,
         )
-        # Some reasoning models (NVIDIA nemotron, o1, o3) reject temperature=0
-        # or return None content when it's set. Pass it only when non-zero.
-        if temperature != 0:
-            kwargs["temperature"] = temperature
 
         response = client.chat.completions.create(**kwargs)
         if not response.choices:
             return ""
-        content = response.choices[0].message.content
-        # Reasoning models may put the answer in reasoning_content or reasoning when content is None
-        if not content:
-            msg = response.choices[0].message
-            content = (
-                getattr(msg, "reasoning_content", None)
-                or getattr(msg, "reasoning", None)
-                or ""
-            )
-        return content or ""
+        return response.choices[0].message.content or ""

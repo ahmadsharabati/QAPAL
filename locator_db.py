@@ -79,7 +79,7 @@ _DYNAMIC_PATH_SEG_RE = re.compile(
     r"(?<=/)"
     r"(?:[0-9A-Za-z]{26}"                                          # ULID (26-char base32)
     r"|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"  # UUID
-    r"|[a-zA-Z0-9_-]*\d{2,}"                                      # slug-with-number (e.g. tipping-the-velvet_999)
+    r"|[a-zA-Z][a-zA-Z0-9]*(?:[_-][a-zA-Z0-9]+)*[_-]\d{2,}"        # slug-with-number (e.g. tipping-the-velvet_999) — requires separator before digits
     r"|\d{4,}"                                                     # numeric IDs ≥4 digits
     r")(?=/|$)"
 )
