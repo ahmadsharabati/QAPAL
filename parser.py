@@ -185,11 +185,22 @@ class PlaywrightASTVisitor(ast.NodeVisitor):
     Traverses a Python AST to find Playwright locator calls.
     More robust than regex for multi-line and dynamic locators.
     """
-    def __init__(self, file_path: str, source_lines: List[str]):
+    def __init__(self, file_path: str, source: str, source_lines: List[str]):
         self.file_path = file_path
+        self.source = source
         self.source_lines = source_lines
         self.results: List[ParsedSelector] = []
         self.language = "python"
+        self.variables: Dict[str, Any] = {}
+
+    def visit_Assign(self, node: ast.Assign):
+        """Track simple string assignments."""
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                val = self._eval_node(node.value)
+                if val:
+                    self.variables[target.id] = val
+        self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call):
         # Case 1: Direct call -> page.locator("...")
@@ -259,7 +270,10 @@ class PlaywrightASTVisitor(ast.NodeVisitor):
 
         # Reconstruct expression
         try:
-            full_expr = ast.unparse(node)
+            # Use exact source segment if available (Python 3.8+)
+            full_expr = ast.get_source_segment(self.source, node)
+            if not full_expr:
+                full_expr = ast.unparse(node)
         except Exception:
             full_expr = f"page.{method_name}(...)"
 
@@ -292,6 +306,8 @@ class PlaywrightASTVisitor(ast.NodeVisitor):
             right = self._eval_node(node.right)
             if left is not None and right is not None:
                 return str(left) + str(right)
+        if isinstance(node, ast.Name):
+            return self.variables.get(node.id)
         return None
 
 
@@ -302,7 +318,7 @@ def parse_file_ast(file_path: str) -> List[ParsedSelector]:
     lines = source.splitlines()
     try:
         tree = ast.parse(source)
-        visitor = PlaywrightASTVisitor(file_path, lines)
+        visitor = PlaywrightASTVisitor(file_path, source, lines)
         visitor.visit(tree)
         return sorted(visitor.results, key=lambda x: x.line_number)
     except Exception as e:
