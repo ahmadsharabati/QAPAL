@@ -106,8 +106,15 @@ def apply_patch(patch: Patch) -> bool:
         else:
             return False
 
-    lines[idx] = line.replace(patch.old_expression, patch.new_expression, 1)
-    path.write_text("".join(lines), encoding="utf-8")
+    new_line = line.replace(patch.old_expression, patch.new_expression, 1)
+    if new_line == line:
+        # Replacement had no effect — old_expression must be an exact duplicate
+        return False
+    lines[idx] = new_line
+    try:
+        path.write_text("".join(lines), encoding="utf-8")
+    except OSError:
+        return False
     return True
 
 

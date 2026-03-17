@@ -133,7 +133,11 @@ def _load_credentials(args) -> dict | None:
     if not path.exists():
         print(f"Error: credentials file not found: {path}", file=sys.stderr)
         sys.exit(1)
-    return json.loads(path.read_text())
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        print(f"Error: invalid JSON in {path}: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _get_db(args):

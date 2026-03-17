@@ -74,8 +74,7 @@ def detect_language(file_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 # Quotes: either single or double
-_Q = r"""(?:["'])(.+?)(?:["'])"""       # capture group for quoted string
-_Qs = r"""["'](.+?)["']"""             # simpler version
+_Qs = r"""["'](.+?)["']"""             # quoted string capture group
 
 _PY_PATTERNS = {
     "testid": re.compile(
