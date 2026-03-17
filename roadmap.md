@@ -45,6 +45,8 @@ Current state: **5/5 on practicesoftwaretesting.com, 5/5 on books.toscrape.com, 
 | 6 | ✅ ~~P1~~ | `executor.py` | ~~Small model for AI rediscovery~~ — `model_override=small_model` wired in `_ai_rediscover()` |
 | 7 | 🟢 **P2** | `generator.py` + `main.py` | **Negative test generation** — failure-path + boundary/edge-case tests from existing PRD |
 | 8 | 🟢 P2 | `action_miner.py` + `site_compiler.py` + `generator.py` + `main.py` | Compiled Site Model & UI Action Mining Engine — 90% token reduction, reusable actions |
+| 8b | 🟢 P2 | `crawler.py` + `executor.py` + `main.py` | Mobile Device Testing — emulate phones/tablets via Playwright device presets |
+| 8c | 🟢 P2 | `feature_generator.py` + `main.py` | Unified Test Generation — PRD + plain text + auto-discovery modes |
 | 9 | 🟢 P3 | `crawler.py` + `main.py` | Wire `classify_page_change()` into graph-crawl to tag edges with `page_change_type` |
 | 10 | 🟢 P3 | `crawler.py` | No-revisit enforcement — use `has_state()` in BFS instead of in-memory set |
 | 11 | 🔵 P4 | `crawler.py` + `state_graph.py` | Screenshot per page node during crawl → `reports/states/<state_id>.png` |
@@ -727,6 +729,92 @@ During crawl, after `crawl_page()`, save `page.screenshot(path=f"reports/states/
 
 ---
 
+## 🟢 P2 — Mobile Device Testing (Emulation)
+
+**Files:** `crawler.py`, `executor.py`, `main.py`
+
+### Problem
+
+QAPAL only tests on desktop viewports. Mobile layouts often hide/show different elements, use hamburger menus, and have different touch interactions. Many bugs are mobile-only.
+
+### Solution
+
+Add `--device "iPhone 12"` and `--viewport W H` CLI flags. Playwright's built-in device presets handle touch, viewport, user-agent, and device-scale-factor transparently via `browser.new_context(**devices[device_name])`.
+
+### Implementation
+
+| Component | Change |
+|-----------|--------|
+| `crawler.py` `_build_context()` | Accept `device_kwargs` dict, spread into all `new_context()` calls |
+| `crawler.py` `Crawler.__init__` | Accept `device` and `viewport` params; resolve Playwright device presets in `start()` |
+| `executor.py` `Executor.__init__` | Accept `device` and `viewport` params; pass through to Crawler and `_build_context()` |
+| `main.py` | Add `--device` and `--viewport` flags to all browser-using commands (`crawl`, `run`, `prd-run`, `semantic`, `graph-crawl`, `explore`, `ux-audit`) |
+| `main.py` command handlers | Wire `device`/`viewport` args to Crawler/Executor constructors |
+| `generator.py` `_meta` | Record device info in plan metadata (informational only) |
+
+### New Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `QAPAL_DEVICE` | `None` (desktop) | Playwright device preset name |
+| `QAPAL_VIEWPORT_WIDTH` | `None` | Custom viewport width |
+| `QAPAL_VIEWPORT_HEIGHT` | `None` | Custom viewport height |
+
+### What Does NOT Change
+
+- All 19 actions work on mobile (Playwright maps click→tap automatically)
+- All 30+ assertions are device-agnostic
+- Locator DB schema unchanged
+- Browser launch unchanged (device config is context-level)
+
+### Risks
+
+- Mobile layouts may show/hide different elements — users should re-crawl per device
+- Unknown device names: fail fast with clear error + examples
+
+**Full plan:** `mobile_plan.md`
+
+---
+
+## 🟢 P2 — Unified Test Generation (PRD + Plain Text + Auto-Discovery)
+
+**Files:** `feature_generator.py` (new), `main.py`
+
+### Problem
+
+QAPAL only generates tests from PRD files. Users who want to quickly test a feature must first write a full PRD. There's no way to say "test login with wrong password" or "just test whatever's on this site."
+
+### Solution
+
+A unified `generate` CLI command with three input modes:
+
+| Mode | Trigger | Input |
+|------|---------|-------|
+| **PRD** | `--prd file.md` | Markdown PRD (existing flow) |
+| **Plain text** | `--text "..."` or `--text-file` | Natural language sentences/bullets |
+| **Auto-discover** | Neither flag | Just URL(s) — crawl and infer testable features |
+
+All three produce the same JSON plan format. One AI call per mode.
+
+### Implementation
+
+| Component | Change |
+|-----------|--------|
+| `feature_generator.py` (new) | `FeatureTestGenerator` class with `generate_from_prd()`, `generate_from_text()`, `generate_from_discovery()` |
+| `main.py` | New `generate` subcommand with `--prd`, `--text`, `--text-file`, `--num-tests`, `--negative-tests`, `--compile` flags |
+| `generator.py` | No structural changes — `FeatureTestGenerator` composes `TestGenerator` internally |
+
+### Design Decisions
+
+- **Composition over inheritance** — wraps `TestGenerator`, doesn't extend it
+- **Single AI call per mode** — consistent with QAPAL's token-efficiency philosophy
+- **Same plan format** — executor needs zero changes
+- **`generate` is plan-only** — does NOT execute; use `run` separately
+
+**Full plan:** `plan.md`
+
+---
+
 ## ⬜ P5 — Nice to Have
 
 ### P5.1 — Concurrent Test Execution
@@ -741,12 +829,13 @@ Add `--parallel N` flag. Use `asyncio.gather()` to run N plans simultaneously, e
 
 | File | Changes |
 |------|---------|
-| `executor.py` | P1: passive error interception + visual regression per-page screenshots; P5: `--parallel` |
-| `main.py` | P1: visual regression summary output; P2: `compile` CLI command + auto-detect in `prd-run`; P3: `classify_page_change` in graph-crawl |
-| `generator.py` | P2: compiled model prompt integration; P2: negative test generation |
-| `crawler.py` | P1: template check in `crawl_page`; P3: `has_state` in BFS; P4: screenshot |
+| `executor.py` | P1: passive error interception + visual regression per-page screenshots; P2: mobile device kwargs in `_build_context`; P5: `--parallel` |
+| `main.py` | P1: visual regression summary output; P2: `compile` CLI command + auto-detect in `prd-run`; P2: `--device`/`--viewport` flags; P2: `generate` command (PRD/text/discovery); P3: `classify_page_change` in graph-crawl |
+| `generator.py` | P2: compiled model prompt integration; P2: negative test generation; P2: device info in `_meta` |
+| `crawler.py` | P1: template check in `crawl_page`; P2: mobile device kwargs in `_build_context` + `Crawler.__init__`; P3: `has_state` in BFS; P4: screenshot |
 | `locator_db.py` | P1: `_compute_template_hash`, `_strip_nth`, `inherit_locators` |
 | `state_graph.py` | P1: `page_templates` table + 3 methods; P4: screenshot in `enrich_and_add` |
 | `action_miner.py` | **new** — P2: UI Action Mining Engine |
 | `site_compiler.py` | **new** — P2: Site Compiler |
 | `compiled_model.json` | **new artifact** — P2: output of compile command |
+| `feature_generator.py` | **new** — P2: Unified test generation (PRD + plain text + auto-discovery) |
