@@ -1128,7 +1128,25 @@ async def _run_assertion(
             checked = await loc.first.is_checked()
             return _assert_pass(a) if not checked else _assert_fail(a, "Element is checked")
 
-        if atype in ("element_text_equals", "element_contains_text"):
+        if atype == "element_focused":
+            if loc is None:
+                return _assert_fail(a, "Element not found")
+            focused = await loc.first.evaluate("el => el === document.activeElement")
+            return _assert_pass(a) if focused else _assert_fail(a, "Element is not focused")
+
+        if atype == "element_editable":
+            if loc is None:
+                return _assert_fail(a, "Element not found")
+            editable = await loc.first.is_editable()
+            return _assert_pass(a) if editable else _assert_fail(a, "Element is not editable")
+
+        if atype == "element_readonly":
+            if loc is None:
+                return _assert_fail(a, "Element not found")
+            editable = await loc.first.is_editable()
+            return _assert_pass(a) if not editable else _assert_fail(a, "Element is editable (not readonly)")
+
+        if atype in ("element_text_equals", "element_contains_text", "element_text_contains"):
             if loc is None:
                 return _assert_fail(a, "Element not found")
             actual = await loc.first.inner_text() or ""
@@ -1137,6 +1155,18 @@ async def _run_assertion(
                  else (val_str in actual)
             return _assert_pass(a, actual) if ok else \
                    _assert_fail(a, f"Text '{actual}' does not {'equal' if atype=='element_text_equals' else 'contain'} '{val_str}'", actual)
+
+        if atype == "element_text_matches":
+            if loc is None:
+                return _assert_fail(a, "Element not found")
+            actual = await loc.first.inner_text() or ""
+            pattern = a.get("pattern", value or "")
+            try:
+                ok = bool(re.search(pattern, actual))
+            except re.error as e:
+                return _assert_fail(a, f"Invalid regex '{pattern}': {e}")
+            return _assert_pass(a, actual) if ok else \
+                   _assert_fail(a, f"Text '{actual}' does not match pattern '{pattern}'", actual)
 
         if atype in ("element_value_equals", "element_value"):
             if loc is None:
@@ -1185,6 +1215,19 @@ async def _run_assertion(
             cls     = str(value) if value is not None else ""
             return _assert_pass(a, classes) if cls in classes else \
                    _assert_fail(a, f"Class '{cls}' not in {classes}", classes)
+
+        if atype == "element_has_style":
+            if loc is None:
+                return _assert_fail(a, "Element not found")
+            prop = a.get("property", "")
+            expected_val = str(a.get("expected", value or ""))
+            actual = await loc.first.evaluate(
+                "(el, prop) => window.getComputedStyle(el).getPropertyValue(prop)", prop
+            )
+            actual = (actual or "").strip()
+            ok = actual == expected_val
+            return _assert_pass(a, actual) if ok else \
+                   _assert_fail(a, f"style[{prop}]='{actual}', expected '{expected_val}'", actual)
 
         if atype == "element_in_viewport":
             if loc is None:
@@ -1373,7 +1416,7 @@ class Executor:
         start   = time.monotonic()
         
         from assertions import validate_assertion
-        for a in test_case.get("assertions", []):
+        for a in (test_case.get("assertions") or []):
             is_valid, errors = validate_assertion(a)
             if not is_valid:
                 return {
@@ -1386,7 +1429,7 @@ class Executor:
                     "screenshot":  None,
                 }
                 
-        for step in test_case.get("steps", []):
+        for step in (test_case.get("steps") or []):
             if step.get("_invalid_element_id"):
                 return {
                     "id":          tc_id,
@@ -1509,7 +1552,7 @@ class Executor:
                 i += 1
 
             if failed_step is None:
-                for a in test_case.get("assertions", []):
+                for a in (test_case.get("assertions") or []):
                     ar = await _run_assertion(
                         page, a, self._db, current_url, self._ai_client
                     )

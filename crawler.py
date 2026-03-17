@@ -115,11 +115,17 @@ A11Y_JS = r"""
       var aria = node.getAttribute('aria-label') ||
                  (node.getAttribute('aria-labelledby') &&
                   (document.getElementById(node.getAttribute('aria-labelledby'))||{}).textContent) || '';
-      if (LANDMARKS.indexOf(tag) !== -1 || LANDMARKS.indexOf(role) !== -1) {
+      var testid = node.getAttribute('data-testid') || node.getAttribute('data-test')
+                || node.getAttribute('data-cy') || node.getAttribute('data-qa') || '';
+      var stableId = node.id && !/^(:r|react-|ng-|v-|\d)/.test(node.id) ? node.id : '';
+      var isLandmark = LANDMARKS.indexOf(tag) !== -1 || LANDMARKS.indexOf(role) !== -1;
+      var isIdentifiable = isLandmark || aria || testid || stableId || (role && role !== 'none' && role !== 'presentation');
+      if (isIdentifiable) {
         var selector = tag;
-        if (aria) selector += '[aria-label="' + aria.trim() + '"]';
-        else if (node.id && !/^(:r|react-|ng-|v-|\d)/.test(node.id))
-          selector += '#' + node.id;
+        if (testid) selector += '[data-testid="' + testid + '"]';
+        else if (aria) selector += '[aria-label="' + aria.trim() + '"]';
+        else if (stableId) selector += '#' + stableId;
+        else if (role && !isLandmark) selector += '[role="' + role + '"]';
         var siblings = node.parentElement
           ? Array.from(node.parentElement.children).filter(function(c){ return c.tagName===node.tagName; })
           : [];
@@ -244,10 +250,18 @@ DOM_FALLBACK_JS = r"""
     for (var depth = 0; depth < 8 && node && node !== document.body; depth++) {
       var tag  = node.tagName.toLowerCase();
       var role = (node.getAttribute('role') || '').toLowerCase();
-      if (LANDMARKS.indexOf(tag) !== -1 || LANDMARKS.indexOf(role) !== -1) {
+      var aria = node.getAttribute('aria-label') || '';
+      var testid = node.getAttribute('data-testid') || node.getAttribute('data-test')
+                || node.getAttribute('data-cy') || node.getAttribute('data-qa') || '';
+      var stableId = node.id && !/^(:r|react-|ng-|v-|\d)/.test(node.id) ? node.id : '';
+      var isLandmark = LANDMARKS.indexOf(tag) !== -1 || LANDMARKS.indexOf(role) !== -1;
+      var isIdentifiable = isLandmark || aria || testid || stableId || (role && role !== 'none' && role !== 'presentation');
+      if (isIdentifiable) {
         var selector = tag;
-        if (node.id && !/^(:r|react-|ng-|v-|\d)/.test(node.id))
-          selector += '#' + node.id;
+        if (testid) selector += '[data-testid="' + testid + '"]';
+        else if (aria) selector += '[aria-label="' + aria.trim() + '"]';
+        else if (stableId) selector += '#' + stableId;
+        else if (role && !isLandmark) selector += '[role="' + role + '"]';
         var siblings = node.parentElement
           ? Array.from(node.parentElement.children).filter(function(c){ return c.tagName===node.tagName; })
           : [];
