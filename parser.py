@@ -37,6 +37,7 @@ class ParsedSelector:
     action: Optional[str]       # "click", "fill", "type", etc. or None
     language: str               # "python" | "typescript"
     raw_line: str = ""          # full source line
+    context_url: Optional[str] = None # URL where this locator belongs (from page.goto)
 
     def __repr__(self) -> str:
         return f"ParsedSelector(L{self.line_number}, {self.selector_type}={self.value!r})"
@@ -238,22 +239,18 @@ class PlaywrightASTVisitor(ast.NodeVisitor):
         self.results: List[ParsedSelector] = []
         self.language = "python"
         self.variables: Dict[str, Any] = {}
-
-    def visit_Assign(self, node: ast.Assign):
-        """Track simple string assignments."""
-        for target in node.targets:
-            if isinstance(target, ast.Name):
-                val = self._eval_node(node.value)
-                if val:
-                    self.variables[target.id] = val
-        self.generic_visit(node)
+        self.page_urls: Dict[str, str] = {} # Variable Name -> Current URL
+        self.current_page_var: Optional[str] = None # Last used page variable (heuristic)
 
     def visit_Call(self, node: ast.Call):
-        # Case 1: Direct call -> page.locator("...")
-        # Case 2: Chained call -> page.locator("...").click()
-        
         # We look for the "locator" part regardless of whether it's followed by an action
         self._check_node(node)
+        
+        # Check for page.goto(url)
+        self._check_navigation(node)
+        
+        # If this assignment is page2 = context.new_page()
+        # We'll handle this in visit_Assign actually.
         
         # If this call is page.locator("...").click(), node.func is an Attribute
         # whose .value is the locator call.
@@ -261,6 +258,53 @@ class PlaywrightASTVisitor(ast.NodeVisitor):
             self._check_node(node.func.value, action=node.func.attr)
 
         self.generic_visit(node)
+
+    def visit_Assign(self, node: ast.Assign):
+        """Track simple string assignments and new_page calls."""
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                # Simple assignments (variables)
+                val = self._eval_node(node.value)
+                if val:
+                    self.variables[target.id] = val
+                
+                # page2 = context.new_page()
+                if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute):
+                    if node.value.func.attr == "new_page":
+                        # We don't know the URL yet, but we track the variable
+                        self.page_urls[target.id] = "about:blank"
+        
+        self.generic_visit(node)
+
+    def _get_root_name(self, node: ast.AST) -> Optional[str]:
+        """Find the base Name of a call chain (e.g. 'page' in page.locator().click())"""
+        curr = node
+        while isinstance(curr, ast.Attribute):
+            curr = curr.value
+        if isinstance(curr, ast.Call):
+            return self._get_root_name(curr.func)
+        if isinstance(curr, ast.Name):
+            return curr.id
+        return None
+
+    def _check_navigation(self, node: ast.Call):
+        """Detect page.goto(url) and context.new_page()."""
+        if not isinstance(node.func, ast.Attribute):
+            return
+
+        method_name = node.func.attr
+        if method_name == "goto":
+            # Extract page variable name (e.g. 'page' in page.goto)
+            if isinstance(node.func.value, ast.Name):
+                page_var = node.func.value.id
+                if len(node.args) >= 1:
+                    url = self._eval_node(node.args[0])
+                    if url:
+                        self.page_urls[page_var] = url
+                        self.current_page_var = page_var
+        elif method_name == "new_page":
+            # context.new_page() 
+            pass
 
     def _check_node(self, node: ast.Call, action: Optional[str] = None):
         if not isinstance(node.func, ast.Attribute):
@@ -323,6 +367,16 @@ class PlaywrightASTVisitor(ast.NodeVisitor):
         except Exception:
             full_expr = f"page.{method_name}(...)"
 
+        # Set context URL
+        page_var = self._get_root_name(node.func)
+        context_url = None
+        if page_var:
+            context_url = self.page_urls.get(page_var)
+        
+        # Fallback to last used page var if direct lookup fails
+        if not context_url and self.current_page_var:
+            context_url = self.page_urls.get(self.current_page_var)
+
         self.results.append(ParsedSelector(
             file_path=self.file_path,
             line_number=node.lineno,
@@ -331,6 +385,7 @@ class PlaywrightASTVisitor(ast.NodeVisitor):
             full_expression=full_expr,
             action=action,
             language=self.language,
+            context_url=context_url,
             raw_line=self.source_lines[node.lineno-1] if 0 < node.lineno <= len(self.source_lines) else ""
         ))
 

@@ -190,7 +190,8 @@ async def cmd_analyze(args):
             results = []
             for parsed in all_selectors:
                 qapal_sel = selector_to_qapal(parsed)
-                result = await engine.probe(args.url, qapal_sel)
+                target_url = parsed.context_url or args.url
+                result = await engine.probe(target_url, qapal_sel)
                 results.append((parsed, result))
 
         # Output
@@ -306,12 +307,19 @@ async def cmd_fix(args):
             ai_client=ai_client,
         ) as engine:
 
-            # First: probe the URL to discover available elements
-            elements = await engine.probe_url(args.url)
+            # Cache for discovered elements per URL
+            url_to_elements = {}
 
             for parsed in all_selectors:
+                target_url = parsed.context_url or args.url
+                
+                # Discover elements if not already cached for this URL
+                if target_url not in url_to_elements:
+                    url_to_elements[target_url] = await engine.probe_url(target_url)
+                
+                elements = url_to_elements[target_url]
                 qapal_sel = selector_to_qapal(parsed)
-                result = await engine.probe(args.url, qapal_sel)
+                result = await engine.probe(target_url, qapal_sel)
 
                 # Only fix broken or weak selectors
                 if result.found and result.confidence >= args.min_confidence:
@@ -321,7 +329,7 @@ async def cmd_fix(args):
                 element_attrs = None
                 if result.found and result.count >= 1:
                     try:
-                        element_attrs = await _extract_element_attrs(engine, args.url, qapal_sel)
+                        element_attrs = await _extract_element_attrs(engine, target_url, qapal_sel)
                     except Exception:
                         pass  # Best-effort
 
