@@ -170,8 +170,54 @@ def _classify_locator(value: str) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Core parsing
+# Core parsing — Regex (used for TypeScript and as Python fallback)
 # ---------------------------------------------------------------------------
+
+def _parse_line(
+    line: str,
+    line_number: int,
+    file_path: str,
+    language: str,
+) -> List[ParsedSelector]:
+    """Parse a single line for Playwright selectors. Returns 0 or more ParsedSelectors."""
+    results = []
+    patterns = _PY_PATTERNS if language == "python" else _TS_PATTERNS
+
+    for sel_type, pattern in patterns.items():
+        for match in pattern.finditer(line):
+            full_expr = match.group(0)
+
+            if sel_type == "role":
+                role_name = match.group(1)
+                name = match.group(2) if match.lastindex >= 2 and match.group(2) else None
+                value: Any = {"role": role_name, "name": name} if name else {"role": role_name}
+            elif sel_type == "locator":
+                raw_val = match.group(1)
+                sel_type_actual, clean_val = _classify_locator(raw_val)
+                value = clean_val
+                sel_type = sel_type_actual
+            else:
+                value = match.group(1)
+
+            # Detect action
+            action = None
+            rest_of_line = line[match.end():]
+            action_match = _ACTION_PATTERN.match(rest_of_line)
+            if action_match:
+                action = action_match.group(1)
+                if action == "selectOption":
+                    action = "select_option"
+
+            results.append(ParsedSelector(
+                file_path=file_path,
+                line_number=line_number,
+                selector_type=sel_type,
+                value=value,
+                full_expression=full_expr,
+                action=action,
+                language=language,
+                raw_line=line.rstrip(),
+            ))
 
     return results
 
