@@ -1,0 +1,79 @@
+# ────────────────────────────────────────────────────────────────────────────
+# QAPAL Selector Health Check — Python / Playwright (pytest)
+#
+# Drop this file into .github/workflows/ in any repo with Python
+# Playwright tests (pytest-playwright).
+#
+# Required repo secrets:
+#   APP_URL  – base URL of the app under test
+# ────────────────────────────────────────────────────────────────────────────
+name: QAPAL Selector Health (Python)
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+  schedule:
+    - cron: '0 8 * * 1'   # Every Monday at 8 AM UTC
+
+jobs:
+  selector-health:
+    name: Analyze Python Selectors
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write credentials file
+        if: ${{ secrets.CREDENTIALS_FILE_CONTENT != '' }}
+        run: echo '${{ secrets.CREDENTIALS_FILE_CONTENT }}' > /tmp/creds.json
+
+      - name: Run QAPAL Selector Analysis
+        id: qapal
+        uses: ahmadsharabati/QAPAL@v2.0.1
+        with:
+          url: ${{ secrets.APP_URL }}
+          test-files: 'tests/**/*.py'
+          mode: analyze
+          language: python
+          output-format: github
+          credentials-file: ${{ secrets.CREDENTIALS_FILE_CONTENT != '' && '/tmp/creds.json' || '' }}
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const total  = '${{ steps.qapal.outputs.total-selectors }}';
+            const strong = '${{ steps.qapal.outputs.strong-selectors }}';
+            const weak   = '${{ steps.qapal.outputs.weak-selectors }}';
+            const broken = '${{ steps.qapal.outputs.broken-selectors }}';
+            const pct    = total > 0 ? Math.round((strong / total) * 100) : 0;
+            const emoji  = broken > 0 ? '🔴' : weak > 0 ? '🟡' : '🟢';
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: [
+                `## ${emoji} QAPAL Selector Health`,
+                `| Metric | Count |`,
+                `|--------|-------|`,
+                `| Total  | ${total} |`,
+                `| Strong (A/B) | ${strong} |`,
+                `| Weak  (C/D) | ${weak} |`,
+                `| Broken (F)  | ${broken} |`,
+                `| Score | **${pct}%** |`,
+                broken > 0 ? `\n> Run \`qapal fix tests/**/*.py --url $APP_URL --apply\` to auto-fix.` : '\n> ✅ All good!',
+              ].join('\n'),
+            });
+
+      - name: Fail if broken selectors
+        if: steps.qapal.outputs.broken-selectors > 0
+        run: |
+          echo "::error::${{ steps.qapal.outputs.broken-selectors }} broken selector(s) detected."
+          exit 1
