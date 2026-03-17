@@ -1,0 +1,93 @@
+# ────────────────────────────────────────────────────────────────────────────
+# QAPAL Selector Health Check — TypeScript / Playwright
+#
+# Drop this file into .github/workflows/ in any repo with TypeScript
+# Playwright tests.  It runs on every push/PR and posts a selector-health
+# summary directly in the PR as a comment.
+#
+# Required repo secrets:
+#   APP_URL   – base URL of the app under test (staging / preview URL)
+#
+# Optional repo secrets:
+#   CREDENTIALS_FILE_CONTENT  – JSON string with login credentials
+# ────────────────────────────────────────────────────────────────────────────
+name: QAPAL Selector Health
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+  # Run weekly to catch drift even without code changes
+  schedule:
+    - cron: '0 8 * * 1'   # Every Monday at 8 AM UTC
+
+jobs:
+  selector-health:
+    name: Analyze Selectors
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # needed to post PR comments
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Write credentials file if provided
+      - name: Write credentials file
+        if: ${{ secrets.CREDENTIALS_FILE_CONTENT != '' }}
+        run: echo '${{ secrets.CREDENTIALS_FILE_CONTENT }}' > /tmp/creds.json
+
+      - name: Run QAPAL Selector Analysis
+        id: qapal
+        uses: ahmadsharabati/QAPAL@v2.0.1
+        with:
+          url: ${{ secrets.APP_URL }}
+          test-files: 'tests/**/*.spec.ts'
+          mode: analyze
+          language: typescript
+          output-format: github
+          credentials-file: ${{ secrets.CREDENTIALS_FILE_CONTENT != '' && '/tmp/creds.json' || '' }}
+
+      # Post results as a PR comment
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const total   = '${{ steps.qapal.outputs.total-selectors }}';
+            const strong  = '${{ steps.qapal.outputs.strong-selectors }}';
+            const weak    = '${{ steps.qapal.outputs.weak-selectors }}';
+            const broken  = '${{ steps.qapal.outputs.broken-selectors }}';
+            const pct     = total > 0 ? Math.round((strong / total) * 100) : 0;
+            const emoji   = broken > 0 ? '🔴' : weak > 0 ? '🟡' : '🟢';
+
+            const body = [
+              `## ${emoji} QAPAL Selector Health Report`,
+              '',
+              `| Metric | Count |`,
+              `|--------|-------|`,
+              `| Total selectors | ${total} |`,
+              `| 💪 Strong (A/B) | ${strong} |`,
+              `| ⚠️  Weak  (C/D) | ${weak} |`,
+              `| 💥 Broken (F)   | ${broken} |`,
+              `| Health score    | **${pct}%** |`,
+              '',
+              broken > 0
+                ? `> ⚡ Run \`qapal fix tests/**/*.spec.ts --url $APP_URL --apply\` locally to auto-fix ${broken} broken selector(s).`
+                : '> ✅ All selectors look healthy!',
+            ].join('\n');
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+      # Fail the job if broken selectors are found (optional — remove to warn only)
+      - name: Fail if broken selectors
+        if: steps.qapal.outputs.broken-selectors > 0
+        run: |
+          echo "::error::Found ${{ steps.qapal.outputs.broken-selectors }} broken selector(s). Run 'qapal fix' to repair them."
+          exit 1

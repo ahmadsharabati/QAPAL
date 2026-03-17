@@ -1,0 +1,133 @@
+# ────────────────────────────────────────────────────────────────────────────
+# QAPAL Self-Healing CI — Full Pipeline
+#
+# Phase 1: Run Playwright tests normally.
+# Phase 2: If tests fail, QAPAL probes broken selectors, generates patches,
+#           applies them, and retries.  If retry passes it opens a PR with
+#           the fixes automatically.
+#
+# This is the "zero-downtime" workflow: broken UI never blocks your pipeline
+# for more than one extra minute.
+#
+# Required repo secrets:
+#   APP_URL         – base URL of the app under test
+#   GH_TOKEN        – GitHub PAT with `contents:write` + `pull-requests:write`
+#                     (used to open the auto-fix PR)
+#
+# Adapt the "Run Playwright tests" step to match your project's test command.
+# ────────────────────────────────────────────────────────────────────────────
+name: Self-Healing Playwright Tests
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+
+jobs:
+  # ─── Phase 1: Normal test run ────────────────────────────────────────────
+  test:
+    name: Run Playwright Tests
+    runs-on: ubuntu-latest
+    outputs:
+      tests-passed: ${{ steps.run-tests.outcome == 'success' }}
+      results-path: ${{ steps.run-tests.outputs.results-path }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright tests
+        id: run-tests
+        continue-on-error: true   # ← don't fail the job; let heal phase decide
+        run: |
+          npx playwright test \
+            --reporter=json \
+            --output=test-results/results.json \
+          || true
+          echo "results-path=test-results/results.json" >> "$GITHUB_OUTPUT"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results
+          path: test-results/
+
+      - name: Pass if tests succeeded
+        if: steps.run-tests.outcome == 'success'
+        run: echo "✅ Tests passed — no healing needed."
+
+  # ─── Phase 2: Heal broken selectors if tests failed ──────────────────────
+  heal:
+    name: QAPAL Self-Heal
+    runs-on: ubuntu-latest
+    needs: test
+    # Only run if tests failed
+    if: needs.test.outputs.tests-passed == 'false'
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Download test results
+        uses: actions/download-artifact@v4
+        with:
+          name: playwright-results
+          path: test-results/
+
+      - name: Write credentials file
+        if: ${{ secrets.CREDENTIALS_FILE_CONTENT != '' }}
+        run: echo '${{ secrets.CREDENTIALS_FILE_CONTENT }}' > /tmp/creds.json
+
+      - name: QAPAL Heal — find + fix broken selectors
+        id: heal
+        uses: ahmadsharabati/QAPAL@v2.0.1
+        with:
+          url: ${{ secrets.APP_URL }}
+          test-files: 'tests/**/*.spec.ts'
+          mode: heal
+          language: typescript
+          test-results: 'test-results/results.json'
+          min-confidence: '0.6'
+          create-pr: 'true'          # ← opens a PR with the patches
+          credentials-file: ${{ secrets.CREDENTIALS_FILE_CONTENT != '' && '/tmp/creds.json' || '' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+
+      # ── Retry tests with patched selectors ──────────────────────────────
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      - name: Retry tests after healing
+        id: retry
+        run: npx playwright test
+
+      # ── Summary ─────────────────────────────────────────────────────────
+      - name: Healing summary
+        if: always()
+        run: |
+          echo "### 🩹 QAPAL Healing Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Patches applied | ${{ steps.heal.outputs.patches-applied }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Broken selectors fixed | ${{ steps.heal.outputs.broken-selectors }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Auto-fix PR | ${{ steps.heal.outputs.pr-url || 'N/A' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Retry outcome | ${{ steps.retry.outcome }} |" >> $GITHUB_STEP_SUMMARY
