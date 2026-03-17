@@ -74,6 +74,7 @@ def create_parser() -> argparse.ArgumentParser:
                         help="Git branch name for PR")
     p_fix.add_argument("--min-confidence", type=float, default=0.5,
                         help="Minimum confidence to apply fix (default: 0.5)")
+    p_fix.add_argument("--ai-fallback", action="store_true", help="Enable LLM fuzzy matching for broken CSS selectors")
 
     # ── generate ──
     p_gen = sub.add_parser("generate", help="Scaffold test files with validated selectors")
@@ -96,6 +97,7 @@ def create_parser() -> argparse.ArgumentParser:
     p_heal.add_argument("--url", required=True, help="Base URL of the application")
     p_heal.add_argument("--pr", action="store_true", help="Create a PR with fixes")
     p_heal.add_argument("--branch", type=str, default="qapal/heal-selectors")
+    p_heal.add_argument("--ai-fallback", action="store_true", help="Enable LLM fuzzy matching for broken CSS selectors")
 
     return parser
 
@@ -168,12 +170,22 @@ async def cmd_analyze(args):
     print(f"Probing against {args.url}...\n")
 
     db = _get_db(args)
+    
+    ai_client = None
+    if getattr(args, "ai_fallback", False):
+        try:
+            from ai_client import AIClient
+            ai_client = AIClient.from_env()
+        except Exception as e:
+            print(f"Warning: Failed to initialize AIClient: {e}. AI fallback disabled.", file=sys.stderr)
+
     try:
         async with ProbeEngine(
             db,
             headless=_get_headless(args),
             credentials=_load_credentials(args),
             device=args.device,
+            ai_client=ai_client,
         ) as engine:
             results = []
             for parsed in all_selectors:
@@ -276,6 +288,14 @@ async def cmd_fix(args):
 
     db = _get_db(args)
     patches = []
+    
+    ai_client = None
+    if getattr(args, "ai_fallback", False):
+        try:
+            from ai_client import AIClient
+            ai_client = AIClient.from_env()
+        except Exception as e:
+            print(f"Warning: Failed to initialize AIClient: {e}. AI fallback disabled.", file=sys.stderr)
 
     try:
         async with ProbeEngine(
@@ -283,6 +303,7 @@ async def cmd_fix(args):
             headless=_get_headless(args),
             credentials=_load_credentials(args),
             device=args.device,
+            ai_client=ai_client,
         ) as engine:
 
             # First: probe the URL to discover available elements
@@ -305,7 +326,7 @@ async def cmd_fix(args):
                         pass  # Best-effort
 
                 # Find the best alternative from discovered elements
-                best_alt = _find_best_alternative(parsed, elements, result, element_attrs)
+                best_alt = await _find_best_alternative(parsed, elements, result, element_attrs, ai_client=ai_client)
                 if best_alt is None:
                     continue
 
@@ -360,10 +381,10 @@ async def _extract_element_attrs(engine, url, qapal_sel):
         # Use .first to handle non-unique selectors gracefully
         attrs = await locator.first.evaluate("""el => ({
             role: el.getAttribute('role') || el.tagName.toLowerCase(),
-            name: el.getAttribute('aria-label') || el.innerText?.trim().substring(0, 100) || '',
+            name: el.getAttribute('aria-label') || (el.textContent || '').trim().substring(0, 100) || '',
             testid: el.getAttribute('data-testid') || el.getAttribute('data-test') || el.getAttribute('data-cy') || null,
             aria_label: el.getAttribute('aria-label') || null,
-            text: el.innerText?.trim().substring(0, 100) || '',
+            text: (el.textContent || '').trim().substring(0, 100) || '',
             placeholder: el.getAttribute('placeholder') || null,
         })""")
         return attrs
@@ -371,7 +392,7 @@ async def _extract_element_attrs(engine, url, qapal_sel):
         return None
 
 
-def _find_best_alternative(parsed, elements, probe_result, element_attrs=None):
+async def _find_best_alternative(parsed, elements, probe_result, element_attrs=None, ai_client=None):
     """
     Find the best alternative selector from discovered elements.
 
@@ -432,6 +453,47 @@ def _find_best_alternative(parsed, elements, probe_result, element_attrs=None):
             if new_strategy != existing_strategy or not probe_result.found:
                 best = (elem.best_selector, elem.confidence)
                 best_score = elem.confidence
+
+    # AI Rediscovery Fallback if no deterministic match is found
+    if best is None and ai_client is not None:
+        try:
+            prompt = f"""We are trying to replace a brittle/broken UI Playwright selector.
+Original brittle selector: type="{parsed.selector_type}", value="{parsed.value}"
+
+Here is the list of ALL actionable semantic elements on the current page:
+"""
+            # Truncate elements list slightly if it's massive to save tokens
+            for idx, elem in enumerate(elements[:150]):
+                prompt += f"  - [{idx}] {elem.best_selector.get('strategy')}: {elem.best_selector.get('value')} (role={elem.role}, name={elem.name})\n"
+            
+            prompt += """
+Based on the structure, context, or visual cues of the original brittle selector, output a strict JSON object mapping to the BEST semantic alternative from the above list. 
+IMPORTANT: Only pick an element from the given list.
+
+Example Output:
+{"strategy": "role", "value": {"role": "link", "name": "Log in"}}
+
+Return ONLY proper JSON. Do not return markdown blocks or any conversational text.
+"""
+            # Use small/fast model for fuzzy matching to keep performance snappy
+            import json
+            response_text = await ai_client.acomplete(prompt, max_tokens=100)
+            response_text = response_text.strip()
+            if "```" in response_text:
+                response_text = response_text.split("```")[1].lstrip("json").strip().split("```")[0]
+            
+            ai_suggestion = json.loads(response_text)
+            
+            # Validate suggestion exists in our list
+            for elem in elements:
+                if elem.best_selector.get("strategy") == ai_suggestion.get("strategy") and \
+                   str(elem.best_selector.get("value")) == str(ai_suggestion.get("value")):
+                    # Penalize AI score slightly so exact deterministic matches always win
+                    best = (elem.best_selector, elem.confidence * 0.9)
+                    break 
+
+        except Exception as e:
+            print(f"AI Fallback heuristic failed: {e}", file=sys.stderr)
 
     return best
 
@@ -585,12 +647,21 @@ async def cmd_heal(args):
     db = _get_db(args)
     patches = []
 
+    ai_client = None
+    if getattr(args, "ai_fallback", False):
+        try:
+            from ai_client import AIClient
+            ai_client = AIClient.from_env()
+        except Exception as e:
+            print(f"Warning: Failed to initialize AIClient: {e}. AI fallback disabled.", file=sys.stderr)
+
     try:
         async with ProbeEngine(
             db,
             headless=_get_headless(args),
             credentials=_load_credentials(args),
             device=args.device,
+            ai_client=ai_client,
         ) as engine:
 
             elements = await engine.probe_url(args.url)
@@ -617,7 +688,7 @@ async def cmd_heal(args):
                 if result.found and result.confidence >= 0.5:
                     continue  # Selector works fine, failure was something else
 
-                best_alt = _find_best_alternative(closest, elements, result)
+                best_alt = await _find_best_alternative(closest, elements, result, ai_client=ai_client)
                 if best_alt:
                     new_selector, new_confidence = best_alt
                     patch = generate_patch(closest, new_selector, new_confidence,

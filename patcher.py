@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import difflib
 import subprocess
+import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -225,6 +227,10 @@ def create_pr(
     if not commit_message:
         n = len(patches)
         commit_message = f"fix(selectors): replace {n} weak selector{'s' if n > 1 else ''} with validated alternatives\n\nAuto-fixed by QAPAL locator intelligence engine."
+
+    if not shutil.which("gh"):
+        print("Error: 'gh' CLI is not found in PATH. Please install it to create PRs.", file=sys.stderr)
+        return None
 
     try:
         # Create branch

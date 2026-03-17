@@ -384,18 +384,20 @@ async def _build_context(
     db:          LocatorDB,
     url:         str,
     credentials: Optional[dict] = None,
+    device_kwargs: Optional[dict] = None,
 ) -> BrowserContext:
     domain  = urlparse(url).netloc
     session = db.get_session(domain)
+    dk = device_kwargs or {}
 
     if session and session.get("storage_state"):
         try:
-            return await browser.new_context(storage_state=session["storage_state"])
+            return await browser.new_context(storage_state=session["storage_state"], **dk)
         except Exception:
             pass
 
     if credentials:
-        ctx  = await browser.new_context()
+        ctx  = await browser.new_context(**dk)
         page = await ctx.new_page()
         try:
             await _run_login(page, credentials)
@@ -413,7 +415,7 @@ async def _build_context(
             await ctx.close()
             raise RuntimeError(f"Login failed: {e}") from e
 
-    return await browser.new_context()
+    return await browser.new_context(**dk)
 
 
 _USERNAME_SELECTORS = [
