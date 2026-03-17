@@ -1,0 +1,114 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qapal"
+version = "2.0.0"
+description = "Locator intelligence engine for Playwright — analyze, fix, and heal test selectors"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Ahmad Sharabati"},
+]
+keywords = [
+    "playwright",
+    "testing",
+    "selectors",
+    "locators",
+    "test-automation",
+    "self-healing",
+    "ci-cd",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+dependencies = [
+    "playwright>=1.40.0",
+    "tinydb>=4.8.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+ai = [
+    "anthropic>=0.18.0",
+    "openai>=1.0.0",
+]
+visual = [
+    "Pillow>=10.0.0",
+]
+semantic = [
+    "crawl4ai>=0.3.0",
+]
+all = [
+    "qapal[ai,visual,semantic]",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.scripts]
+qapal = "cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ahmadsharabati/QAPAL"
+Repository = "https://github.com/ahmadsharabati/QAPAL"
+Issues = "https://github.com/ahmadsharabati/QAPAL/issues"
+
+[tool.setuptools.packages.find]
+include = ["qapal*"]
+exclude = ["tests*", "plans*"]
+
+[tool.setuptools]
+py-modules = [
+    # Locator intelligence engine (new)
+    "cli",
+    "probe",
+    "ranker",
+    "parser",
+    "patcher",
+    "scaffold",
+    # Core runtime
+    "executor",
+    "crawler",
+    "locator_db",
+    "planner",
+    "generator",
+    "ai_client",
+    "actions",
+    "assertions",
+    "state_graph",
+    "replanner",
+    "semantic_extractor",
+    "codegen",
+    "main",
+    # Vision & exploration
+    "explorer",
+    "vision_client",
+    "ux_evaluator",
+    "ux_report",
+    # Utilities & private modules
+    "_log",
+    "_tokens",
+    "action_miner",
+    "feature_generator",
+    "site_compiler",
+    "smoke_semantic",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

@@ -1,241 +1,351 @@
-# QAPal — AI-Powered Test Automation Framework
+# QAPAL
 
-AI plans once. Code executes deterministically. No AI in the execution loop.
+**Locator intelligence engine for Playwright.**
+Analyze, fix, and heal broken test selectors — automatically.
 
----
-
-## How to Run
-
-### 1. Install dependencies
-
-```bash
-pip install -r requirements.txt
+```
+pip install qapal
 playwright install chromium
 ```
 
-### 2. Configure `.env`
+---
+
+## The Problem
+
+Playwright tests break when selectors go stale. A renamed CSS class, a removed `data-testid`, a changed button label — and your entire CI pipeline goes red. Teams spend hours manually hunting down which selector broke and what to replace it with.
+
+## The Solution
+
+QAPAL probes your selectors against the live page, scores them by resilience, and replaces weak ones with validated alternatives. No AI in the loop at runtime. Pure locator resolution + scoring.
 
 ```bash
-# Claude (recommended)
-QAPAL_AI_PROVIDER=anthropic
-ANTHROPIC_API_KEY=sk-ant-...
-QAPAL_AI_MODEL=claude-sonnet-4-6
+# Find every weak selector in your test suite
+qapal analyze tests/ --url https://staging.myapp.com
 
-# OR Groq (free tier, fast)
-# QAPAL_AI_PROVIDER=openai
-# QAPAL_AI_BASE_URL=https://api.groq.com/openai/v1
-# OPENAI_API_KEY=gsk_...
-# QAPAL_AI_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
+# Auto-fix them
+qapal fix tests/ --url https://staging.myapp.com --apply
+
+# CI self-healing: tests fail -> QAPAL patches -> opens a PR
+qapal heal --test-results results.json --url https://staging.myapp.com --pr
 ```
 
-### 3. Create credentials file
+---
+
+## Quick Start
+
+### Analyze selector health
+
+```bash
+$ qapal analyze tests/login.spec.ts --url https://myapp.com/login
+
+File                            Line  Type         Value                          Found      Grade
+-------------------------------------------------------------------------------------------------
+login.spec.ts                      9  placeholder  Email address                    YES [A - 0.83]
+login.spec.ts                     10  placeholder  Password                         YES [A - 0.83]
+login.spec.ts                     12  css          .btn-submit                      YES [B - 0.70]
+login.spec.ts                     15  testid       nonexistent                       NO [F - 0.00]
+
+--- Summary ---
+Total: 4  |  Strong: 2  |  Weak: 1  |  Broken: 1
+```
+
+Grades: **A** (>0.8) rock-solid, **B** (>0.6) acceptable, **C** (>0.4) fragile, **D/F** replace immediately.
+
+### Fix weak selectors
+
+```bash
+$ qapal fix tests/login.spec.ts --url https://myapp.com/login --dry-run
+
+Found 1 selector replacement(s):
+
+  login.spec.ts:12  page.locator(".btn-submit")  ->  page.getByRole("button", { name: "Sign In" })
+                    [A - 0.88]  Replaced css with role (confidence: 0.88)
+
+--- Diff Preview (--dry-run) ---
+
+--- a/login.spec.ts
++++ b/login.spec.ts
+@@ -9,7 +9,7 @@
+   await page.getByPlaceholder('Email address').fill('user@test.com');
+   await page.getByPlaceholder('Password').fill('secret');
+
+-  await page.locator('.btn-submit').click();
++  await page.getByRole('button', { name: 'Sign In' }).click();
+```
+
+Happy with it? Apply:
+
+```bash
+qapal fix tests/login.spec.ts --url https://myapp.com/login --apply
+```
+
+Or send a PR directly:
+
+```bash
+qapal fix tests/ --url https://myapp.com --pr
+```
+
+### Probe a single selector
+
+```bash
+$ qapal probe "page.getByTestId('email')" --url https://myapp.com/login
+
+Selector: page.getByTestId('email')
+Type:     testid
+Value:    email
+Probing https://myapp.com/login...
+
+Found:       YES
+Count:       1
+Visible:     True
+Enabled:     True
+In viewport: True
+Confidence:  [A - 0.95]
+Strategy:    testid
+```
+
+### Generate a test scaffold
+
+```bash
+$ qapal generate --url https://myapp.com/login --language python
+
+Probing https://myapp.com/login...
+Discovered 6 interactive elements.
+Scaffold written to: tests/generated/test_login.py
+```
+
+Output:
+
+```python
+"""Auto-generated scaffold by QAPAL"""
+from playwright.sync_api import Page, expect
+
+# === Validated elements on https://myapp.com/login ===
+#
+# Textbox "Email"        -> page.get_by_test_id("email")           [A - 0.95]
+# Textbox "Password"     -> page.get_by_test_id("password")        [A - 0.95]
+# Button "Sign In"       -> page.get_by_role("button", name=...)   [A - 0.88]
+# Link "Forgot password" -> page.get_by_role("link", name=...)     [B - 0.72]
+
+def test_login(page: Page):
+    page.goto("https://myapp.com/login", wait_until="domcontentloaded")
+
+    # TODO: Write your test logic using the validated selectors above
+    pass
+```
+
+### CI Self-Healing
+
+```bash
+# In your CI pipeline, after tests fail:
+qapal heal --test-results results.json --url $STAGING_URL --pr
+```
+
+QAPAL reads the failure report, finds which selectors broke, probes for working alternatives, patches the files, and opens a PR.
+
+---
+
+## How It Works
+
+QAPAL has a 4-step locator resolution chain:
+
+```
+1. DB chain lookup     (cached selectors from previous crawls)
+2. Primary selector    (the one in your test file)
+3. Fallback selector   (testid-prefix matching, OR-locator for testid variants)
+4. AI rediscovery      (one-shot AI call using accessibility snapshot -- optional)
+```
+
+### Scoring Model
+
+Each selector gets a confidence score (0.0 - 1.0) based on weighted factors:
+
+| Factor | Weight | What it measures |
+|--------|--------|-----------------|
+| Strategy | 35% | `testid` > `role` > `text` > `css` |
+| Uniqueness | 30% | Does it match exactly 1 element? |
+| Visibility | 15% | Is the element visible and in viewport? |
+| Interactability | 10% | Is the element enabled? |
+| History | 10% | Past success/failure rate |
+
+Strategy scores:
+
+| Strategy | Score | Why |
+|----------|-------|-----|
+| `testid` | 1.0 | Explicit test contract, never changes accidentally |
+| `id` | 0.9 | Stable but may conflict |
+| `role` | 0.8 | Semantic, accessible, resilient |
+| `aria-label` | 0.75 | Good but may be localized |
+| `label` | 0.7 | Tied to form structure |
+| `placeholder` | 0.65 | Can change with UX copy |
+| `text` | 0.5 | Fragile to copy changes |
+| `css` | 0.3 | Breaks on any style refactor |
+| `xpath` | 0.2 | Breaks on any DOM change |
+
+---
+
+## CLI Reference
+
+```
+qapal analyze <files> --url <url> [--format table|json|github]
+qapal fix     <files> --url <url> [--dry-run|--apply|--pr] [--min-confidence 0.8]
+qapal generate        --url <url> [--output dir] [--language python|typescript]
+qapal probe   "<sel>" --url <url>
+qapal heal    --test-results <json> --url <url> [--pr]
+```
+
+### Global Options
+
+| Flag | Description |
+|------|-------------|
+| `--headless` | Run browser headlessly (default) |
+| `--headed` | Show browser window |
+| `--device` | Playwright device preset (e.g. `"iPhone 12"`) |
+| `--credentials-file` | JSON file with login credentials |
+| `--timeout` | Action timeout in ms (default: 10000) |
+| `--db-path` | Path to locator DB (default: `locators.json`) |
+
+### GitHub Actions Output
+
+```bash
+qapal analyze tests/ --url $STAGING_URL --format github
+```
+
+Outputs GitHub-compatible annotations:
+
+```
+::error file=tests/login.spec.ts,line=19::Broken selector: page.getByTestId('nonexistent') - element not found
+::warning file=tests/login.spec.ts,line=12::Weak selector: page.locator('.btn') (confidence: 0.30)
+```
+
+---
+
+## GitHub Action
+
+Add to your CI workflow:
+
+```yaml
+name: Playwright Tests + QAPAL Healing
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install qapal[ai]
+          playwright install chromium --with-deps
+
+      - name: Run Playwright tests
+        id: tests
+        continue-on-error: true
+        run: |
+          pytest tests/ --json-report --json-report-file=results.json
+
+      - name: QAPAL Analyze
+        if: always()
+        run: |
+          qapal analyze tests/ --url ${{ vars.STAGING_URL }} --format github
+
+      - name: QAPAL Heal (on failure)
+        if: steps.tests.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          qapal heal --test-results results.json --url ${{ vars.STAGING_URL }} --pr
+```
+
+---
+
+## Authentication
+
+For apps behind login, provide a credentials file:
 
 ```json
-// toolbox_creds.json
 {
-  "url": "https://practicesoftwaretesting.com/auth/login",
-  "username": "customer2@practicesoftwaretesting.com",
-  "password": "welcome01"
+  "url": "https://myapp.com/login",
+  "username": "test@example.com",
+  "password": "testpass123",
+  "username_field": "email",
+  "password_field": "password",
+  "submit_button": "sign-in"
 }
 ```
 
-### 4. Run commands
+```bash
+qapal analyze tests/ --url https://myapp.com/dashboard --credentials-file creds.json
+```
+
+---
+
+## Python + TypeScript
+
+QAPAL parses both languages:
+
+**Python** (`pytest-playwright`):
+```python
+page.get_by_test_id("email")
+page.get_by_role("button", name="Submit")
+page.locator(".css-selector")
+```
+
+**TypeScript** (`@playwright/test`):
+```typescript
+page.getByTestId('email')
+page.getByRole('button', { name: 'Submit' })
+page.locator('.css-selector')
+```
+
+Fixes are generated in the correct language for each file.
+
+---
+
+## Installation
 
 ```bash
-# Full pipeline: crawl → generate plans from PRD → execute all tests
-python main.py prd-run --prd toolbox.md --url https://practicesoftwaretesting.com --credentials-file toolbox_creds.json
-
-# Re-crawl (force fresh locators, e.g. after product ULIDs change)
-python main.py prd-run --prd toolbox.md --url https://practicesoftwaretesting.com --credentials-file toolbox_creds.json --force
-
-# Run existing plan files directly (skip regeneration)
-python main.py run --plans plans/TC001_login_plan.json plans/TC002_add_to_cart_plan.json --credentials-file toolbox_creds.json
-
-# Crawl only
-python main.py crawl --urls https://practicesoftwaretesting.com/category/hand-tools --credentials-file toolbox_creds.json
-
-# Check locator DB status
-python main.py status
+pip install qapal
+playwright install chromium
 ```
 
----
+### Optional extras
 
-## Architecture
-
-```
-PRD (markdown)
-     │
-     ▼
-[1] Crawler ──────────────────────► LocatorDB (locators.json / TinyDB)
-     Playwright A11Y extraction           │
-     DOM visibility check                 │
-     StateGraph nav transitions           │
-                                          ▼
-[2] Generator ◄── PRD + locators + nav_graph
-     AI call (temperature=0)              │
-     _fix_url_assertions post-proc        │
-     5 test plan JSONs                    │
-                                          ▼
-[3] Executor ─────────────────────────────┘
-     Deterministic Playwright
-     OR-locator (data-testid|data-test|data-cy|data-qa)
-     scroll_into_view_if_needed
-     Self-healing fallback selectors
-     Zero AI calls during execution
-```
-
-### Key files
-
-| File | Purpose |
-|------|---------|
-| `main.py` | CLI: `crawl`, `run`, `prd-run`, `status`, `graph` |
-| `crawler.py` | Playwright A11Y crawler, writes to LocatorDB |
-| `generator.py` | PRD → 5 JSON test plans via AI |
-| `executor.py` | Deterministic test execution |
-| `planner.py` | Manual test case → execution plan via AI |
-| `state_graph.py` | Nav graph (URL transitions, reachable paths) |
-| `locator_db.py` | TinyDB wrapper for element locators |
-| `ai_client.py` | AI provider abstraction (Anthropic / OpenAI-compatible) |
-
----
-
-## Plan File Format
-
-```json
-{
-  "test_id": "TC001_login",
-  "name": "User can log in",
-  "steps": [
-    { "action": "navigate", "url": "https://..." },
-    { "action": "fill", "selector": {"strategy": "testid", "value": "email"}, "value": "user@test.com" },
-    { "action": "click", "selector": {"strategy": "testid", "value": "login-submit"} }
-  ],
-  "assertions": [
-    { "type": "url_contains", "value": "/account" }
-  ]
-}
-```
-
-### Selector strategies
-
-| Strategy | Example |
-|----------|---------|
-| `testid` | `{"strategy": "testid", "value": "login-submit"}` — matches `data-testid`, `data-test`, `data-cy`, `data-qa` |
-| `testid_prefix` | `{"strategy": "testid_prefix", "value": "product-", "index": 0}` — first element whose testid starts with prefix |
-| `role` | `{"strategy": "role", "value": {"role": "button", "name": "Add to cart"}}` |
-| `css` | `{"strategy": "css", "value": "form > button.primary"}` |
-
-### Assertion types
-
-`url_contains`, `url_equals`, `element_visible`, `element_exists`, `element_text_contains`, `element_text_equals`, `element_enabled`, `element_disabled`
-
-### Step options
-
-```json
-{ "action": "fill", "selector": {...}, "value": "...", "timeout": 30000 }
-```
-
----
-
-## Recent Updates (Session Log)
-
-### Executor (`executor.py`)
-- **OR-locator for testid** — `data-testid | data-test | data-cy | data-qa` so any test-id convention works
-- **Removed `set_test_id_attribute("data-test")`** — was globally breaking default Playwright testid resolution
-- **`scroll_into_view_if_needed()`** before every interaction (click, fill, check) — eliminates viewport failures
-- **`count = 0` init** before selector block — prevents `UnboundLocalError` crash
-- **Fallback selector guard** — only returns fallback locator if `count >= 1` (clearer error on not-found)
-- **Per-step timeout** — `timeout` field in step JSON is passed all the way to `_verify_actionable()`
-- **Auto-coerce string `value` → testid selector** for `element_visible` assertions
-
-### Generator (`generator.py`)
-- **`temperature=0`** — same PRD produces identical plans every run
-- **Nav graph `min_count=2`** — filters one-off noise edges, keeps reliable transitions only
-- **Landing URL lookup** — uses `_SUBMIT_LABELS` set to find correct post-login URL (not admin redirects)
-- **Rule 12 strengthened** — AI must not assert a URL that has no outgoing nav-graph edge
-- **RULE D added** — product links must use testid, never role+name
-- **NOT ACTIONABLE filter** — locators with `actionable=False` excluded from AI prompt
-- **`_fix_url_assertions()` post-processor** — simulates URL state through steps, auto-corrects wrong URL assertions
-- **`max_tokens=4096`** — reduced from 8192 to respect Groq free-tier limit
-
-### Planner (`planner.py`)
-- **Chain-of-thought prompt** — AI writes reasoning before JSON (STEP 1 / STEP 2 format)
-- **Retry loop (3 attempts)** — detects hallucinated `element_id` values, feeds bad IDs back, retries
-- **Improved `_parse_plan`** — regex `json` block extraction, skips `navigate` steps in ID validation
-
-### Crawler (`crawler.py`)
-- **DOM visibility check** — `el.offsetWidth > 0 && el.offsetHeight > 0` in A11Y JS; mobile-only hidden buttons get `actionable=False`
-
-### State Graph (`state_graph.py`)
-- **`min_count` filter** in `format_for_prompt()` — removes noise transitions
-- **Filters `navigate` trigger actions** — test-runner noise, not real user interactions
-- **Prefix URL matching** — `url.startswith(base + "/")` instead of exact match
-- **Reachable paths** — capped at 12, `/admin/*` skipped
-
-### LocatorDB (`locator_db.py`)
-- **Upsert guard fix** — allows updating existing records to `actionable=False` on re-crawl (previously blocked all non-actionable writes)
-
-### AI Client (`ai_client.py`)
-- **Default model updated** — `claude-sonnet-4-6` (was `claude-sonnet-4-5`)
-- **`temperature=0`** added to all `complete()` / `acomplete()` signatures
-
----
-
-## Known Bugs & Limitations
-
-### 1. Account lockout (practicesoftwaretesting.com)
-The demo site locks accounts after ~5 failed login attempts. Current working account: `customer2@practicesoftwaretesting.com / welcome01`. If locked, rotate to `customer@` (and back when it unlocks). **Never run `prd-run --force` in a loop with wrong credentials.**
-
-### 2. TC004 checkout — stateful flow (IN PROGRESS)
-The checkout test requires: login → add-to-cart → nav-cart → proceed-1 → proceed-2 → fill billing → proceed-3 → finish. AI-generated plans navigate directly to `/checkout` (empty cart). The manually-written `plans/TC004_checkout_plan.json` has the correct flow but `prd-run` overwrites it on each generation. **Workaround: use `run` command with existing plan files.**
-
-### 3. Product ULIDs change periodically
-Product URLs contain ULIDs (`/product/01KK...`) that change when the site resets. When `testid_prefix` tests fail, re-crawl category pages with `--force`.
-
-### 4. Country field is a textbox, not a select
-The checkout country field (`data-test="country"`) is an Angular autocomplete textbox, not a `<select>`. Use `action: fill` not `action: select`.
-
-### 5. Checkout wizard step numbering
-The 4-step Angular checkout wizard:
-- `proceed-1` → confirms cart (step 1)
-- `proceed-2` → proceeds past sign-in (step 2, even when already logged in)
-- `proceed-3` → submits billing address (step 3)
-- `finish` → confirms payment (step 4)
-
-### 6. `prd-run` always regenerates plans
-`prd-run` overwrites plan JSON files on every run. Manually edited plans are lost. **Use `run --plans` to execute specific plan files without regenerating.**
-
----
-
-## Current Test Status (practicesoftwaretesting.com)
-
-Run with:
 ```bash
-python main.py run \
-  --plans plans/TC001_login_plan.json \
-          plans/TC002_add_to_cart_plan.json \
-          plans/TC003_register_plan.json \
-          plans/TC004_checkout_plan.json \
-          plans/TC005_product_info_plan.json \
-  --credentials-file toolbox_creds.json
+pip install "qapal[ai]"       # AI rediscovery (anthropic + openai)
+pip install "qapal[all]"      # Everything
 ```
 
-| Test | Status | Notes |
-|------|--------|-------|
-| TC001_login | ✓ pass | login → assert url=/account |
-| TC002_add_to_cart | ✓ pass | hand-tools → product → add-to-cart |
-| TC003_register | ✓ pass | register form → assert url=/auth/register |
-| TC004_checkout | ✗ in-progress | Full flow in manual plan; proceed-1→2→3→finish |
-| TC005_product_info | ✓ pass | hand-tools → product → assert url=/product/ + add-to-cart visible |
+### From source
+
+```bash
+git clone https://github.com/ahmadsharabati/QAPAL.git
+cd QAPAL
+pip install -e ".[dev]"
+playwright install chromium
+```
 
 ---
 
-## Environment Variables Reference
+## Environment Variables
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `QAPAL_AI_PROVIDER` | yes | `anthropic` \| `openai` \| `grok` |
-| `ANTHROPIC_API_KEY` | if anthropic | Anthropic API key |
-| `OPENAI_API_KEY` | if openai/grok | OpenAI or Groq API key |
-| `QAPAL_AI_MODEL` | no | Override model (default: `claude-sonnet-4-6`) |
-| `QAPAL_AI_BASE_URL` | no | Custom OpenAI-compatible endpoint (e.g. Groq) |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `QAPAL_HEADLESS` | `true` | Run browser headlessly |
+| `QAPAL_DB_PATH` | `locators.json` | Locator database path |
+| `QAPAL_ACTION_TIMEOUT` | `10000` | Timeout per action (ms) |
+| `QAPAL_AI_REDISCOVERY` | `true` | Enable AI fallback for missing locators |
+| `QAPAL_AI_PROVIDER` | `anthropic` | AI provider: `anthropic`, `openai`, `grok` |
+| `ANTHROPIC_API_KEY` | - | Required for AI rediscovery with Claude |
+| `OPENAI_API_KEY` | - | Required for AI rediscovery with GPT-4 |
+
+---
+
+## License
+
+MIT
