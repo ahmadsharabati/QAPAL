@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main, "claude/**"]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  unit-tests:
+    name: Unit Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install tinydb python-dotenv
+
+      - name: Run core unit tests (no browser)
+        run: python tests/test.py
+
+      - name: Run locator engine unit tests (no browser)
+        run: python tests/test_locator_engine.py
+
+  lint:
+    name: Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check all modules parse cleanly
+        run: |
+          python -c "
+          import ast, sys
+          modules = [
+              'ranker.py','parser.py','patcher.py','scaffold.py',
+              'cli.py','probe.py','executor.py','locator_db.py',
+              'crawler.py','planner.py','generator.py','ai_client.py',
+              'actions.py','assertions.py','state_graph.py',
+          ]
+          failed = []
+          for f in modules:
+              try:
+                  ast.parse(open(f).read())
+                  print(f'  OK  {f}')
+              except SyntaxError as e:
+                  print(f'  FAIL {f}: {e}')
+                  failed.append(f)
+          if failed:
+              sys.exit(1)
+          print(f'All {len(modules)} modules OK')
+          "
+
+  package:
+    name: Package Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build package
+        run: python -m build
+
+      - name: Check dist contents
+        run: |
+          pip install twine
+          twine check dist/*
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: [unit-tests, lint, package]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+    environment:
+      name: pypi
+      url: https://pypi.org/p/qapal
+    permissions:
+      id-token: write  # Required for trusted publishing (OIDC)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build package
+        run: python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # Uses OIDC trusted publishing — no API token needed.
+        # Configure at: https://pypi.org/manage/account/publishing/
