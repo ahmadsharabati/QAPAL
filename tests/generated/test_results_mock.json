@@ -1,0 +1,18 @@
+{
+  "tests": [
+    {
+      "nodeid": "tests/generated/test_todomvc_real.py::test_todomvc_add_item",
+      "outcome": "failed",
+      "call": {
+        "longrepr": "tests/generated/test_todomvc_real.py:13: in test_todomvc_add_item\n    page.locator('.todo-list li').first.click()\nplaywright._impl._errors.TimeoutError: Timeout 30000ms exceeded."
+      }
+    },
+    {
+      "nodeid": "tests/generated/test_todomvc_real.py::test_todomvc_add_item",
+      "outcome": "failed",
+      "call": {
+        "longrepr": "tests/generated/test_todomvc_real.py:19: in test_todomvc_add_item\n    page.get_by_test_id('nonexistent-element').click()\nplaywright._impl._errors.TimeoutError: Timeout 30000ms exceeded."
+      }
+    }
+  ]
+}

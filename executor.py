@@ -189,18 +189,19 @@ async def _visual_compare(page, test_id: str, step_index: int) -> dict | None:
     return None
 
 
-# Lazy singleton for the small-model AI client (element rediscovery)
-_small_ai_client_cache = None
-
-def _get_small_ai_client(fallback):
-    global _small_ai_client_cache
-    if _small_ai_client_cache is None:
-        try:
-            from ai_client import AIClient
-            _small_ai_client_cache = AIClient.small_from_env()
-        except Exception:
-            _small_ai_client_cache = fallback
-    return _small_ai_client_cache
+# ── Probe engine (extracted) ──────────────────────────────────────────
+# Locator resolution, element validation, and AI rediscovery live in probe.py.
+# Imported here for backward compatibility — existing code that does
+# `from executor import resolve_locator` continues to work.
+from probe import (
+    _resolve_frame,
+    _safe_count,
+    _build_locator,
+    resolve_locator,
+    _ai_rediscover,
+    _verify_actionable,
+    _get_small_ai_client,
+)
 
 # Unknown-state recovery caps (all overridable via env vars)
 MAX_REPLANS_PER_TEST = int(os.getenv("QAPAL_MAX_REPLANS",       "1"))
@@ -272,304 +273,9 @@ def _detect_unknown_state(db: LocatorDB, url: str, dom_hash: str) -> bool:
     return not db.get_all(url, valid_only=True)
 
 
-# ── Selector resolution ────────────────────────────────────────────────
 
-def _resolve_frame(page: Page, frame_key: Optional[str]):
-    """Return the frame context. None / 'main' returns the page itself."""
-    if not frame_key or frame_key == "main":
-        return page
-    for frame in page.frames:
-        if frame.name == frame_key or (frame.url and frame_key == _normalize_url(frame.url)):
-            return frame
-    return page
-
-
-async def _safe_count(loc) -> int:
-    """Call loc.count() safely — returns 0 on Playwright parse/selector errors (e.g. invalid CSS)."""
-    try:
-        return await loc.count()
-    except Exception:
-        return 0
-
-
-def _build_locator(ctx, selector: dict) -> Optional[Locator]:
-    """Build a Playwright Locator from a selector dict. Returns None on bad input."""
-    if not selector:
-        return None
-    strategy = selector.get("strategy", "")
-    value    = selector.get("value")
-    # Normalise: AI sometimes uses a role name ("combobox", "button", etc.) as the strategy.
-    # Re-route these as role selectors.  Must happen BEFORE the value is None check so that
-    # {"strategy": "link", "name": "Hand Tools"} (no "value" key) is handled correctly.
-    _ARIA_ROLES = {"button", "link", "textbox", "combobox", "checkbox", "radio",
-                   "listitem", "listbox", "option", "menuitem", "tab", "tabpanel",
-                   "dialog", "alert", "img", "heading", "search"}
-    if strategy in _ARIA_ROLES:
-        if isinstance(value, dict):
-            role_name = value.get("name")
-        elif value is None:
-            # AI sometimes places "name" at the selector top level instead of inside "value"
-            role_name = selector.get("name") or selector.get("label")
-        else:
-            role_name = None
-        value = {"role": strategy, "name": role_name} if role_name is not None else {"role": strategy}
-        strategy = "role"
-    if value is None:
-        return None
-    try:
-        if strategy == "testid_prefix":
-            # Index-based list interaction (Section 7 of architecture doc).
-            # Matches any element whose test-id STARTS WITH the given prefix.
-            # e.g. {"strategy": "testid_prefix", "value": "product-", "index": 0}
-            # → clicks the first product card regardless of its ULID.
-            if isinstance(value, dict):
-                prefix = str(value.get("prefix") or value.get("value") or next(iter(value.values()), ""))
-                idx = int(value.get("index", 0))
-            else:
-                prefix = str(value)
-                idx = int(selector.get("index", 0))
-            prefix_loc = (
-                ctx.locator(f'[data-testid^="{prefix}"]')
-                .or_(ctx.locator(f'[data-test^="{prefix}"]'))
-                .or_(ctx.locator(f'[data-cy^="{prefix}"]'))
-                .or_(ctx.locator(f'[data-qa^="{prefix}"]'))
-            )
-            return prefix_loc.nth(idx)
-        if strategy == "testid":
-            # Normalise: AI sometimes wraps as {"testid": "..."} instead of a plain string
-            if isinstance(value, dict):
-                value = value.get("testid") or value.get("value") or next(iter(value.values()), "")
-            value = str(value)
-            # Cover all common test-id attributes — site-agnostic resolution.
-            # Playwright .or_() is lazy: stops at first match, no performance cost.
-            return (ctx.get_by_test_id(value)                    # data-testid (Playwright default)
-                    .or_(ctx.locator(f'[data-test="{value}"]'))  # common test-id attribute
-                    .or_(ctx.locator(f'[data-cy="{value}"]'))    # Cypress convention
-                    .or_(ctx.locator(f'[data-qa="{value}"]')))
-        if strategy == "role":
-            if isinstance(value, dict):
-                name = value.get("name")
-                if isinstance(name, str) and name.startswith("^"):
-                    name = re.compile(name)
-                return ctx.get_by_role(value["role"], name=name) if name is not None else ctx.get_by_role(value["role"])
-            return ctx.get_by_role(str(value))
-        if strategy == "label":
-            return ctx.get_by_label(str(value))
-        if strategy == "placeholder":
-            return ctx.get_by_placeholder(str(value))
-        if strategy == "text":
-            return ctx.get_by_text(str(value))
-        if strategy == "alt_text":
-            return ctx.get_by_alt_text(str(value))
-        if strategy == "aria-label":
-            return ctx.locator(f'[aria-label="{value}"]')
-        if strategy in ("css", "id", "xpath"):
-            prefix = "xpath=" if strategy == "xpath" else ("#" if strategy == "id" else "")
-            return ctx.locator(f"{prefix}{value}")
-    except Exception:
-        pass
-    return None
-
-
-async def resolve_locator(
-    page:     Page,
-    selector: dict,
-    fallback: Optional[dict],
-    db:       LocatorDB,
-    page_url: str,
-    ai_client=None,
-    frame_key: str = "main",
-) -> Tuple[Optional[Locator], str]:
-    """
-    Resolve a selector dict to a Playwright Locator.
-    Returns (locator, strategy_used) or (None, failure_reason).
-
-    Resolution order:
-      1. primary selector
-      2. fallback selector
-      3. AI rediscovery (once, if enabled and client available)
-      4. None
-    """
-    ctx = _resolve_frame(page, frame_key)
-
-    # 0. DB locator chain — when element_id is known, try the DB's primary+fallback selectors first.
-    #    This uses the testid/role stored during crawl (more reliable than AI-generated selectors).
-    eid = selector.get("element_id") if selector else None
-    if eid:
-        db_record = db.get_by_id(eid)
-        if db_record:
-            chain = db_record.get("locators", {}).get("chain", [])
-            for chain_sel in chain:
-                cloc = _build_locator(ctx, chain_sel)
-                if cloc is not None:
-                    try:
-                        await cloc.first.wait_for(state="attached", timeout=10000)
-                    except Exception:
-                        pass
-                    ccount = await _safe_count(cloc)
-                    if ccount >= 1:
-                        return (cloc if ccount == 1 else cloc.first), f"db:{chain_sel.get('strategy')}"
-
-    # 1. Primary
-    count = 0  # initialize so 1b fallback can safely read count == 0 when loc is None
-    loc = _build_locator(ctx, selector)
-    if selector and loc is not None:
-        # Wait for element to attach — handles SPA frameworks that render asynchronously
-        try:
-            await loc.first.wait_for(state="attached", timeout=10000)
-        except Exception:
-            pass
-        count = await _safe_count(loc)
-        if count == 1:
-            # Update DB uniqueness
-            element_id = selector.get("element_id")
-            if element_id:
-                db.mark_unique(element_id, True)
-            return loc, selector.get("strategy", "primary")
-        if count > 1:
-            element_id = selector.get("element_id")
-            if element_id:
-                db.mark_unique(element_id, False)
-            # Try scoping with container if provided
-            container = selector.get("container")
-            if container:
-                scoped = ctx.locator(container).locator(loc)
-                if await _safe_count(scoped) == 1:
-                    return scoped, f"{selector.get('strategy')}+container"
-            # Return first — executor continues, assertion may catch wrong element
-            return loc.first, f"{selector.get('strategy')} (first of {count})"
-
-    # 1b. Role+exact=False fallback — handles accessible names with embedded whitespace/newlines
-    #     (e.g. product cards where star-rating chars are concatenated into the link name).
-    if selector and selector.get("strategy") == "role":
-        val = selector.get("value")
-        if isinstance(val, dict) and val.get("name") and count == 0:
-            raw_name: str = val["name"]
-            # Build a list of name candidates to try (full → progressively trimmed).
-            # Product card accessible names are stored as "Combination Pliers ABCDE$14.15"
-            # (rating chars concatenated) but the live DOM renders "Combination Pliers A B C D E $14.15"
-            # (each rating char separated by whitespace). Strip the trailing UPPERCASE run + price.
-            import re as _re
-            _strip_pattern = _re.compile(r'\s*[A-Z]{2,}.*$')
-            trimmed_name   = _strip_pattern.sub("", raw_name).strip()
-            candidates = [raw_name]
-            if trimmed_name and trimmed_name != raw_name:
-                candidates.append(trimmed_name)
-            for cname in candidates:
-                try:
-                    fuzzy = ctx.get_by_role(val["role"], name=cname, exact=False)
-                    fcount = await fuzzy.count()
-                    if fcount == 1:
-                        return fuzzy, "role:exact=False"
-                    if fcount > 1:
-                        return fuzzy.first, f"role:exact=False (first of {fcount})"
-                except Exception:
-                    pass
-
-    # 2. Fallback selector
-    if fallback:
-        loc = _build_locator(ctx, fallback)
-        if loc is not None:
-            count = await _safe_count(loc)
-            if count >= 1:
-                return loc.first, f"fallback:{fallback.get('strategy')}"
-
-    # 2b. Testid prefix fallback — if the testid value ends in a ULID/UUID/hash suffix
-    #     (dynamic ID that may rotate), try matching any element whose test-id starts with
-    #     the static prefix. e.g. "product-01KKEXF1FCV..." → [data-testid^="product-"]
-    if selector and selector.get("strategy") == "testid":
-        raw_val = selector.get("value", "")
-        if isinstance(raw_val, dict):
-            raw_val = raw_val.get("testid") or raw_val.get("value") or ""
-        raw_val = str(raw_val)
-        # Detect a ULID (26 base32 chars) or UUID (8-4-4-4-12) or long hex (≥16) suffix
-        _id_suffix = re.compile(
-            r"-([0-9A-Za-z]{26}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-fA-F]{16,})$"
-        )
-        m = _id_suffix.search(raw_val)
-        if m:
-            prefix = raw_val[: m.start() + 1]  # e.g. "product-"
-            prefix_loc = (
-                ctx.locator(f'[data-testid^="{prefix}"]')
-                .or_(ctx.locator(f'[data-test^="{prefix}"]'))
-                .or_(ctx.locator(f'[data-cy^="{prefix}"]'))
-                .or_(ctx.locator(f'[data-qa^="{prefix}"]'))
-            )
-            try:
-                pcount = await prefix_loc.count()
-                if pcount >= 1:
-                    return prefix_loc.first, f"testid:prefix={prefix}"
-            except Exception:
-                pass
-
-    # 3. AI rediscovery
-    if AI_REDISCOVERY and ai_client is not None:
-        loc, strategy = await _ai_rediscover(page, selector, db, page_url, ai_client)
-        if loc is not None:
-            return loc, strategy
-
-    strategy = selector.get("strategy", "?") if selector else "?"
-    value    = selector.get("value", "?") if selector else "?"
-    return None, f"Element not found — strategy={strategy} value={value}"
-
-
-async def _ai_rediscover(
-    page:      Page,
-    selector:  dict,
-    db:        LocatorDB,
-    page_url:  str,
-    ai_client,
-) -> Tuple[Optional[Locator], str]:
-    """One AI call to find a lost element. Updates DB if found."""
-    try:
-        snapshot      = await page.accessibility.snapshot() or {}
-        snapshot_text = json.dumps(snapshot, indent=2)[:3000]
-        value         = selector.get("value", {})
-        role          = value.get("role", "") if isinstance(value, dict) else ""
-        name          = value.get("name", "") if isinstance(value, dict) else str(value)
-
-        prompt = f"""Find a UI element on the page.
-Target: role={role} name={name} strategy={selector.get('strategy')}
-
-Accessibility snapshot (truncated):
-{snapshot_text}
-
-Return JSON only — the best Playwright locator:
-{{"strategy": "role", "value": {{"role": "button", "name": "Submit"}}}}
-Valid strategies: role, testid, css, label, placeholder, aria-label"""
-
-        text = await _get_small_ai_client(ai_client).acomplete(prompt)
-        text = text.strip()
-        if "```" in text:
-            text = text.split("```")[1].lstrip("json").strip().split("```")[0]
-
-        new_sel = json.loads(text)
-        loc     = _build_locator(page, new_sel)
-        if loc and await _safe_count(loc) >= 1:
-            db.mark_ai_rediscovered(
-                url       = page_url,
-                role      = role,
-                name      = name,
-                new_chain = [{"strategy": new_sel.get("strategy"),
-                              "value": new_sel.get("value"), "unique": None}],
-            )
-            return loc.first, "ai_rediscovery"
-    except Exception:
-        pass
-    return None, "ai_rediscovery_failed"
-
-
-# ── Pre-action verification ───────────────────────────────────────────
-
-async def _verify_actionable(loc: Locator, timeout: int = ACTION_TIMEOUT) -> Tuple[bool, str]:
-    try:
-        await loc.wait_for(state="visible",  timeout=timeout)
-        await loc.wait_for(state="attached", timeout=timeout)
-        if await loc.is_disabled():
-            return False, "Element is disabled"
-        return True, "ok"
-    except PlaywrightError as e:
-        return False, str(e)
+# NOTE: _resolve_frame, _safe_count, _build_locator, resolve_locator,
+# _ai_rediscover, _verify_actionable are now in probe.py (imported above).
 
 
 # ── Action execution ──────────────────────────────────────────────────
@@ -1039,8 +745,9 @@ async def _run_assertion(
 
         if atype == "url_matches":
             actual = page.url
-            return _assert_pass(a, actual) if re.search(value, actual) else \
-                   _assert_fail(a, f"URL '{actual}' does not match '{value}'", actual)
+            pattern = a.get("pattern", value)
+            return _assert_pass(a, actual) if re.search(pattern, actual) else \
+                   _assert_fail(a, f"URL '{actual}' does not match '{pattern}'", actual)
 
         if atype == "title_contains":
             actual = await page.title()
@@ -1188,7 +895,8 @@ async def _run_assertion(
             if loc is None:
                 return _assert_fail(a, "Element not found", 0)
             count    = await loc.count()
-            expected = int(value) if value is not None and str(value).isdigit() else 0
+            raw      = a.get("count", value)
+            expected = int(raw) if raw is not None and str(raw).isdigit() else 0
             operator = a.get("operator", "equals")
             checks   = {"equals": count == expected, "at_least": count >= expected,
                         "at_most": count <= expected, "greater_than": count > expected,
@@ -1212,7 +920,7 @@ async def _run_assertion(
             if loc is None:
                 return _assert_fail(a, "Element not found")
             classes = (await loc.first.get_attribute("class") or "").split()
-            cls     = str(value) if value is not None else ""
+            cls     = str(a.get("class", value)) if a.get("class", value) is not None else ""
             return _assert_pass(a, classes) if cls in classes else \
                    _assert_fail(a, f"Class '{cls}' not in {classes}", classes)
 
@@ -1220,7 +928,7 @@ async def _run_assertion(
             if loc is None:
                 return _assert_fail(a, "Element not found")
             prop = a.get("property", "")
-            expected_val = str(a.get("expected", value or ""))
+            expected_val = str(a.get("value", a.get("expected", "")))
             actual = await loc.first.evaluate(
                 "(el, prop) => window.getComputedStyle(el).getPropertyValue(prop)", prop
             )
@@ -1289,6 +997,8 @@ class Executor:
         ai_client                     = None,
         credentials:  Optional[dict]  = None,
         state_graph:  Optional[StateGraph] = None,
+        device:       Optional[str]   = None,
+        viewport:     Optional[tuple] = None,
     ):
         self._db          = db
         self._headless    = headless if headless is not None else (
@@ -1297,6 +1007,9 @@ class Executor:
         self._ai_client   = ai_client
         self._credentials = credentials
         self._state_graph = state_graph
+        self._device_name = device or os.getenv("QAPAL_DEVICE", None)
+        self._viewport    = viewport  # (width, height) tuple or None
+        self._device_kwargs: dict = {}
         self._pw          = None
         self._browser     = None
         self._crawler     = None
@@ -1304,10 +1017,28 @@ class Executor:
     async def start(self):
         self._pw          = await async_playwright().start()
         self._browser     = await self._pw.chromium.launch(headless=self._headless)
+
+        # Resolve device emulation kwargs
+        self._device_kwargs = {}
+        if self._device_name:
+            try:
+                self._device_kwargs = dict(self._pw.devices[self._device_name])
+            except KeyError:
+                available = ", ".join(sorted(self._pw.devices.keys())[:10])
+                raise ValueError(
+                    f"Unknown device '{self._device_name}'. Examples: {available}..."
+                )
+        if self._viewport:
+            self._device_kwargs["viewport"] = {
+                "width": self._viewport[0], "height": self._viewport[1]
+            }
+
         self._crawler     = Crawler(self._db, headless=self._headless,
-                                    credentials=self._credentials)
+                                    credentials=self._credentials,
+                                    device=self._device_name, viewport=self._viewport)
         self._crawler._browser = self._browser
         self._crawler._pw      = self._pw
+        self._crawler._device_kwargs = self._device_kwargs
         self._crawler._started = True
 
     async def close(self):
@@ -1446,6 +1177,7 @@ class Executor:
             self._db,
             test_case.get("url", ""),
             self._credentials,
+            self._device_kwargs,
         )
         page = await ctx.new_page()
 

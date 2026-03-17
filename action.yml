@@ -1,0 +1,141 @@
+name: 'QAPAL Selector Healing'
+description: 'Analyze, fix, and heal broken Playwright selectors automatically'
+author: 'Ahmad Sharabati'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  url:
+    description: 'Base URL to probe selectors against (e.g. staging URL)'
+    required: true
+  test-files:
+    description: 'Glob pattern for test files (default: tests/**/*.spec.ts)'
+    required: false
+    default: 'tests/**/*.spec.ts'
+  test-results:
+    description: 'Path to pytest-json-report results file (for heal mode)'
+    required: false
+    default: ''
+  mode:
+    description: 'Mode: analyze, fix, or heal'
+    required: false
+    default: 'analyze'
+  min-confidence:
+    description: 'Minimum confidence threshold for fix mode (0.0-1.0)'
+    required: false
+    default: '0.5'
+  output-format:
+    description: 'Output format: table, json, or github'
+    required: false
+    default: 'github'
+  create-pr:
+    description: 'Create a PR with fixes (fix/heal mode only)'
+    required: false
+    default: 'false'
+  language:
+    description: 'Test language: python or typescript'
+    required: false
+    default: 'typescript'
+  credentials-file:
+    description: 'Path to JSON credentials file for authenticated pages'
+    required: false
+    default: ''
+  python-version:
+    description: 'Python version to use'
+    required: false
+    default: '3.12'
+  qapal-version:
+    description: 'QAPAL version to install (default: latest)'
+    required: false
+    default: 'qapal'
+
+outputs:
+  total-selectors:
+    description: 'Total number of selectors found'
+  strong-selectors:
+    description: 'Number of strong selectors (grade A/B)'
+  weak-selectors:
+    description: 'Number of weak selectors (grade C/D)'
+  broken-selectors:
+    description: 'Number of broken selectors (grade F)'
+  patches-applied:
+    description: 'Number of patches applied (fix/heal mode)'
+  pr-url:
+    description: 'URL of created PR (if --pr used)'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install QAPAL + Playwright
+      shell: bash
+      run: |
+        pip install ${{ inputs.qapal-version }}
+        playwright install chromium --with-deps
+
+    - name: Run QAPAL Analyze
+      if: inputs.mode == 'analyze'
+      shell: bash
+      run: |
+        CRED_FLAG=""
+        if [ -n "${{ inputs.credentials-file }}" ]; then
+          CRED_FLAG="--credentials-file ${{ inputs.credentials-file }}"
+        fi
+
+        qapal analyze ${{ inputs.test-files }} \
+          --url "${{ inputs.url }}" \
+          --format "${{ inputs.output-format }}" \
+          $CRED_FLAG
+
+    - name: Run QAPAL Fix
+      if: inputs.mode == 'fix'
+      shell: bash
+      run: |
+        CRED_FLAG=""
+        if [ -n "${{ inputs.credentials-file }}" ]; then
+          CRED_FLAG="--credentials-file ${{ inputs.credentials-file }}"
+        fi
+
+        PR_FLAG=""
+        if [ "${{ inputs.create-pr }}" = "true" ]; then
+          PR_FLAG="--pr"
+        else
+          PR_FLAG="--apply"
+        fi
+
+        qapal fix ${{ inputs.test-files }} \
+          --url "${{ inputs.url }}" \
+          --min-confidence ${{ inputs.min-confidence }} \
+          $PR_FLAG \
+          $CRED_FLAG
+
+    - name: Run QAPAL Heal
+      if: inputs.mode == 'heal'
+      shell: bash
+      run: |
+        if [ -z "${{ inputs.test-results }}" ]; then
+          echo "::error::test-results input is required for heal mode"
+          exit 1
+        fi
+
+        CRED_FLAG=""
+        if [ -n "${{ inputs.credentials-file }}" ]; then
+          CRED_FLAG="--credentials-file ${{ inputs.credentials-file }}"
+        fi
+
+        PR_FLAG=""
+        if [ "${{ inputs.create-pr }}" = "true" ]; then
+          PR_FLAG="--pr"
+        fi
+
+        qapal heal \
+          --test-results "${{ inputs.test-results }}" \
+          --url "${{ inputs.url }}" \
+          $PR_FLAG \
+          $CRED_FLAG

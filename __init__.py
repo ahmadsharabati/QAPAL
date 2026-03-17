@@ -33,7 +33,7 @@ Usage:
         trace = await explorer.explore("https://app.com")
 """
 
-from .locator_db import LocatorDB
+from .locator_db import LocatorDB, build_chain
 from .crawler import Crawler, crawl_page, wait_for_stable
 from .planner import Planner, PlanningError
 from .executor import Executor
@@ -43,6 +43,13 @@ from .ai_client import AIClient
 from .vision_client import VisionClient
 from .explorer import Explorer
 from .ux_evaluator import UXEvaluator, UXAuditResult
+
+# Locator intelligence engine modules
+from .probe import ProbeEngine, ProbeResult, ElementInfo, probe_element, probe_page
+from .ranker import score_selector, rank_candidates, SelectorCandidate, SelectorGrade
+from .parser import parse_file, parse_directory, ParsedSelector
+from .patcher import apply_patches, preview_patches, generate_patch, Patch
+from .scaffold import generate_python_scaffold, generate_typescript_scaffold, generate_file
 
 __version__ = "2.0.0"
 __all__ = [
@@ -58,6 +65,28 @@ __all__ = [
     "Explorer",
     "UXEvaluator",
     "UXAuditResult",
+
+    # Locator intelligence engine
+    "ProbeEngine",
+    "ProbeResult",
+    "ElementInfo",
+    "probe_element",
+    "probe_page",
+    "score_selector",
+    "rank_candidates",
+    "SelectorCandidate",
+    "SelectorGrade",
+    "parse_file",
+    "parse_directory",
+    "ParsedSelector",
+    "apply_patches",
+    "preview_patches",
+    "generate_patch",
+    "Patch",
+    "generate_python_scaffold",
+    "generate_typescript_scaffold",
+    "generate_file",
+    "build_chain",
 
     # Errors
     "PlanningError",

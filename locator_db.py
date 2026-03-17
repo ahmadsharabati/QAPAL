@@ -255,6 +255,10 @@ def _build_chain(element: dict, container: str) -> List[Dict[str, Any]]:
     return chain
 
 
+# Public alias so other modules can import without underscore
+build_chain = _build_chain
+
+
 # ── LocatorDB ─────────────────────────────────────────────────────────
 
 class LocatorDB:
