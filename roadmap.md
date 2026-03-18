@@ -39,14 +39,15 @@ Current state: **5/5 on practicesoftwaretesting.com, 5/5 on books.toscrape.com, 
 |---|----------|------|------|
 | 1 | ✅ ~~P0~~ | `generator.py` | ~~Wrong ARIA role~~ — fixed in 13bfc00 |
 | 2 | ✅ ~~P0~~ | `crawler.py` + `locator_db.py` | ~~Unnamed buttons missing from DB~~ — fixed in 13bfc00 |
-| 3 | 🔴 **P1** | `executor.py` | **Passive error interception** — console errors, network failures, JS exceptions on every run |
-| 4 | 🔴 **P1** | `executor.py` + `main.py` | **Visual regression baseline + diff** — screenshot per page/navigation, pixel-diff on re-runs |
-| 5 | 🟡 P1 | `locator_db.py` + `state_graph.py` + `crawler.py` | DOM Template Fingerprinting — skip re-crawling structurally identical pages |
+| 3 | ✅ ~~P1~~ | `executor.py` | ~~Passive error interception~~ — console errors, network failures, JS exceptions |
+| 4 | ✅ ~~P1~~ | `executor.py` + `main.py` | ~~Visual regression baseline + diff~~ — screenshot per page, pixel-diff on re-runs |
+| 5 | ✅ ~~P1~~ | `locator_db.py` + `state_graph.py` + `crawler.py` | ~~DOM Template Fingerprinting~~ — skip re-crawling structurally identical pages |
 | 6 | ✅ ~~P1~~ | `executor.py` | ~~Small model for AI rediscovery~~ — `model_override=small_model` wired in `_ai_rediscover()` |
-| 7 | 🟢 **P2** | `generator.py` + `main.py` | **Negative test generation** — failure-path + boundary/edge-case tests from existing PRD |
-| 8 | 🟢 P2 | `action_miner.py` + `site_compiler.py` + `generator.py` + `main.py` | Compiled Site Model & UI Action Mining Engine — 90% token reduction, reusable actions |
-| 8b | 🟢 P2 | `crawler.py` + `executor.py` + `main.py` | Mobile Device Testing — emulate phones/tablets via Playwright device presets |
-| 8c | 🟢 P2 | `feature_generator.py` + `main.py` | Unified Test Generation — PRD + plain text + auto-discovery modes |
+| 7 | ✅ ~~P2~~ | `generator.py` + `main.py` | ~~Negative test generation~~ — failure-path + boundary/edge-case tests |
+| 8 | ✅ ~~P2~~ | `action_miner.py` + `site_compiler.py` + `generator.py` + `main.py` | ~~Compiled Site Model & UI Action Mining Engine~~ — 90% token reduction |
+| 8b | ✅ ~~P2~~ | `crawler.py` + `executor.py` + `main.py` | ~~Mobile Device Testing~~ — `--device "iPhone 12"` / `--viewport W H` |
+| 8c | ✅ ~~P2~~ | `feature_generator.py` + `main.py` | ~~Unified Test Generation~~ — PRD + plain text + auto-discovery modes |
+| NEW | ✅ | `generator.py` | **PRD-aware page relevance filtering** — only send relevant pages to AI planner |
 | 9 | 🟢 P3 | `crawler.py` + `main.py` | Wire `classify_page_change()` into graph-crawl to tag edges with `page_change_type` |
 | 10 | 🟢 P3 | `crawler.py` | No-revisit enforcement — use `has_state()` in BFS instead of in-memory set |
 | 11 | 🔵 P4 | `crawler.py` + `state_graph.py` | Screenshot per page node during crawl → `reports/states/<state_id>.png` |

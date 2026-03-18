@@ -8,7 +8,8 @@ execution plans in a single AI call.
 import json
 import re
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Set
+from urllib.parse import urlparse
 
 from locator_db import LocatorDB, DYNAMIC_ID_RE as _DYNAMIC_ID_RE
 from planner import PlanningError, _format_locators, _format_semantic_contexts, _parse_plan
@@ -131,6 +132,120 @@ AVAILABLE LOCATORS FOR THIS PAGE:
 """
 
 
+def _extract_relevant_pages(prd_content: str, all_urls: List[str], seed_urls: List[str]) -> Set[str]:
+    """
+    Filter crawled page URLs to only those relevant to the PRD content.
+
+    Strategy (zero AI cost):
+    1. Seed URLs are always included.
+    2. URLs explicitly mentioned in the PRD are included.
+    3. Path segments from the PRD are matched against crawled URLs.
+    4. Common pages (login, register, checkout, cart, account) are always
+       included when the PRD mentions related keywords.
+
+    Returns the set of relevant URLs.
+    """
+    relevant: Set[str] = set(seed_urls)
+
+    # Normalize PRD text for matching
+    prd_lower = prd_content.lower()
+
+    # 1. Include any crawled URL that appears verbatim in the PRD
+    for url in all_urls:
+        if url in prd_content:
+            relevant.add(url)
+
+    # 2. Extract URL-like paths from the PRD (e.g., /login, /elements/text-box)
+    prd_paths = set(re.findall(r'(?:^|[\s(,])(/[a-z][a-z0-9_/-]+)', prd_lower))
+
+    # 3. Extract keywords from the PRD — scan ALL text, not just structured elements.
+    #    This ensures body text like "log in securely" and "registration" are captured.
+    _STOPWORDS = {
+        'the', 'and', 'for', 'that', 'with', 'this', 'from', 'are', 'has',
+        'should', 'must', 'can', 'will', 'test', 'page', 'user', 'click',
+        'verify', 'check', 'navigate', 'enter', 'fill', 'select', 'button',
+        'field', 'input', 'ensure', 'using', 'want', 'need', 'also', 'each',
+        'all', 'any', 'not', 'use', 'via', 'see', 'run', 'new', 'get',
+    }
+    prd_keywords: Set[str] = set()
+    for word in re.split(r'[\s,.:;()\[\]{}"\'*#|/!?<>=+]+', prd_lower):
+        if len(word) >= 3 and word not in _STOPWORDS:
+            prd_keywords.add(word)
+
+    # 3b. Semantic URL-pattern mapping — common PRD concepts → URL path segments.
+    #     E.g., PRD says "login" or "authentication" → matches /auth/login, /signin, etc.
+    _CONCEPT_TO_PATHS = {
+        'login':           {'login', 'signin', 'sign-in', 'auth'},
+        'log':             {'login', 'signin', 'auth'},
+        'register':        {'register', 'signup', 'sign-up', 'auth'},
+        'registration':    {'register', 'signup', 'sign-up', 'auth'},
+        'authentication':  {'login', 'register', 'auth', 'signin', 'signup'},
+        'checkout':        {'checkout', 'cart', 'payment', 'order'},
+        'cart':            {'cart', 'basket', 'checkout'},
+        'search':          {'search', 'find', 'query'},
+        'profile':         {'profile', 'account', 'settings'},
+        'account':         {'account', 'profile', 'settings'},
+        'contact':         {'contact', 'support', 'help'},
+        'password':        {'forgot-password', 'reset-password', 'auth'},
+    }
+    for concept, path_segments in _CONCEPT_TO_PATHS.items():
+        if concept in prd_keywords:
+            prd_keywords |= path_segments
+
+    # 4. Match crawled URLs against PRD paths and keywords
+    for url in all_urls:
+        if url in relevant:
+            continue
+        parsed = urlparse(url)
+        path = parsed.path.rstrip("/").lower()
+
+        # Direct path match: PRD mentions /elements and URL is .../elements/text-box
+        for prd_path in prd_paths:
+            prd_path = prd_path.rstrip("/")
+            if path == prd_path or path.startswith(prd_path + "/"):
+                relevant.add(url)
+                break
+
+        if url in relevant:
+            continue
+
+        # Keyword match: URL path segments match PRD keywords
+        segments = [s for s in path.split("/") if s and len(s) >= 3]
+        for seg in segments:
+            # Normalize hyphens to match keywords
+            seg_normalized = seg.replace("-", " ").replace("_", " ")
+            seg_words = seg_normalized.split()
+            for word in seg_words:
+                if word in prd_keywords:
+                    relevant.add(url)
+                    break
+            if url in relevant:
+                break
+
+    # 5. Include parent pages of relevant URLs (they contain nav to reach children)
+    parents_to_add: Set[str] = set()
+    for url in list(relevant):
+        parsed = urlparse(url)
+        parts = parsed.path.rstrip("/").split("/")
+        # Walk up the path: /elements/text-box → /elements → /
+        for i in range(len(parts) - 1, 0, -1):
+            parent_path = "/".join(parts[:i]) or "/"
+            parent_url = f"{parsed.scheme}://{parsed.netloc}{parent_path}"
+            if parent_url in all_urls or (parent_url + "/") in all_urls:
+                parents_to_add.add(parent_url)
+                # Check with trailing slash too
+                parents_to_add.add(parent_url + "/")
+    relevant |= {u for u in parents_to_add if u in set(all_urls)}
+
+    log.info("  [relevance] %d/%d crawled pages selected as relevant to PRD",
+             len(relevant), len(all_urls))
+    if len(all_urls) > len(relevant):
+        excluded = set(all_urls) - relevant
+        log.debug("  [relevance] Excluded pages: %s", ", ".join(sorted(excluded)[:10]))
+
+    return relevant
+
+
 class TestGenerator:
     """
     Generates execution plans from a PRD by querying the DB and calling AI once.
@@ -173,12 +288,17 @@ class TestGenerator:
         # are kept per URL.
         #
         # Filtering strategy to stay within token limits:
-        # - Exclude /admin/* pages — not relevant for user-facing tests
-        # - For /product/* pages, keep only the most-crawled representative page
+        # 1. PRD-aware page relevance filter — only include pages the PRD cares about
+        # 2. Exclude /admin/* pages — not relevant for user-facing tests
+        # 3. For /product/* pages, keep only the most-crawled representative page
         all_locs = self._db.get_all_locators(valid_only=True)
 
+        # ── PRD-aware page relevance filtering ──────────────────────────
+        # Collect all unique URLs in the database
+        all_crawled_urls = list({loc.get("url", "") for loc in all_locs if loc.get("url")})
+        relevant_urls = _extract_relevant_pages(prd_content, all_crawled_urls, urls)
+
         # Find the single most-crawled product page (most hit_count sum)
-        from urllib.parse import urlparse
         from collections import defaultdict
         product_page_hits: dict = defaultdict(int)
         for loc in all_locs:
@@ -196,6 +316,9 @@ class TestGenerator:
             name      = loc.get("identity", {}).get("name", "")
             container = loc.get("identity", {}).get("container", "")
 
+            # Skip pages not relevant to the PRD
+            if url and url not in relevant_urls:
+                continue
             # Skip admin pages entirely — irrelevant for typical user PRDs
             if "/admin" in url:
                 continue
@@ -261,7 +384,6 @@ class TestGenerator:
             login_url = credentials.get("url", "")
             landing_url = ""
             if self._state_graph and login_url:
-                from urllib.parse import urlparse
                 login_path = urlparse(login_url).path or "/"
                 all_transitions = self._state_graph.all_transitions()
                 # Identify login submit transitions by trigger label or testid.

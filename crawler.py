@@ -380,22 +380,24 @@ async def wait_for_stable(page: Page, timeout: int = 10_000):
 # ── Auth ──────────────────────────────────────────────────────────────
 
 async def _build_context(
-    browser:     Browser,
-    db:          LocatorDB,
-    url:         str,
-    credentials: Optional[dict] = None,
+    browser:       Browser,
+    db:            LocatorDB,
+    url:           str,
+    credentials:   Optional[dict] = None,
+    device_kwargs: Optional[dict] = None,
 ) -> BrowserContext:
+    extra   = device_kwargs or {}
     domain  = urlparse(url).netloc
     session = db.get_session(domain)
 
     if session and session.get("storage_state"):
         try:
-            return await browser.new_context(storage_state=session["storage_state"])
+            return await browser.new_context(storage_state=session["storage_state"], **extra)
         except Exception:
             pass
 
     if credentials:
-        ctx  = await browser.new_context()
+        ctx  = await browser.new_context(**extra)
         page = await ctx.new_page()
         try:
             await _run_login(page, credentials)
@@ -413,7 +415,7 @@ async def _build_context(
             await ctx.close()
             raise RuntimeError(f"Login failed: {e}") from e
 
-    return await browser.new_context()
+    return await browser.new_context(**extra)
 
 
 _USERNAME_SELECTORS = [
@@ -690,9 +692,11 @@ class Crawler:
     def __init__(
         self,
         db:           LocatorDB,
-        headless:     Optional[bool] = None,
-        credentials:  Optional[dict] = None,
+        headless:     Optional[bool]  = None,
+        credentials:  Optional[dict]  = None,
         state_graph=None,
+        device:       Optional[str]   = None,
+        viewport:     Optional[tuple] = None,
     ):
         self._db          = db
         self._headless    = headless if headless is not None else (
@@ -700,6 +704,9 @@ class Crawler:
         )
         self._credentials = credentials
         self._state_graph = state_graph
+        self._device_name = device or os.getenv("QAPAL_DEVICE", None)
+        self._viewport    = viewport  # (width, height) tuple or None
+        self._device_kwargs: dict = {}
         self._pw          = None
         self._browser     = None
         self._started     = False
@@ -710,6 +717,28 @@ class Crawler:
         self._pw      = await async_playwright().start()
         self._pw.selectors.set_test_id_attribute("data-test")
         self._browser = await self._pw.chromium.launch(headless=self._headless)
+
+        # Resolve device emulation kwargs
+        self._device_kwargs = {}
+        if self._device_name:
+            try:
+                self._device_kwargs = dict(self._pw.devices[self._device_name])
+                log.info("  [device] Emulating %s (%dx%d)",
+                         self._device_name,
+                         self._device_kwargs.get("viewport", {}).get("width", "?"),
+                         self._device_kwargs.get("viewport", {}).get("height", "?"))
+            except KeyError:
+                available = ", ".join(sorted(self._pw.devices.keys())[:10])
+                raise ValueError(
+                    f"Unknown device '{self._device_name}'. Examples: {available}..."
+                )
+        if self._viewport:
+            self._device_kwargs["viewport"] = {
+                "width": self._viewport[0], "height": self._viewport[1]
+            }
+            if not self._device_name:
+                log.info("  [device] Custom viewport %dx%d", self._viewport[0], self._viewport[1])
+
         self._started = True
 
     async def stop(self):
@@ -744,7 +773,7 @@ class Crawler:
         """Crawl a single URL in an isolated context."""
         if not self._started:
             await self.start()
-        ctx  = await _build_context(self._browser, self._db, url, self._credentials)
+        ctx  = await _build_context(self._browser, self._db, url, self._credentials, self._device_kwargs)
         page = await ctx.new_page()
         try:
             await page.goto(url, wait_until="domcontentloaded")
@@ -774,7 +803,7 @@ class Crawler:
 
         async def _one(url: str):
             async with semaphore:
-                ctx  = await _build_context(self._browser, self._db, url, self._credentials)
+                ctx  = await _build_context(self._browser, self._db, url, self._credentials, self._device_kwargs)
                 page = await ctx.new_page()
                 try:
                     await page.goto(url, wait_until="domcontentloaded")
@@ -874,7 +903,7 @@ class Crawler:
         async def _extract_links(url: str) -> list[str]:
             """Navigate to url, return same-domain hrefs. Fast — no DB write."""
             async with disc_semaphore:
-                ctx  = await _build_context(self._browser, self._db, url, self._credentials)
+                ctx  = await _build_context(self._browser, self._db, url, self._credentials, self._device_kwargs)
                 page = await ctx.new_page()
                 try:
                     await page.goto(url, wait_until="domcontentloaded", timeout=15_000)
@@ -908,11 +937,21 @@ class Crawler:
             link_lists = await asyncio.gather(*[_extract_links(u) for u in current_level])
 
             next_level = []
-            for hrefs in link_lists:
+            for source_url, hrefs in zip(current_level, link_lists):
                 for href in hrefs:
                     if urlparse(href).netloc not in allowed_domains:
                         continue
                     norm = _normalize_url(href)
+                    # Record navigation edge regardless of whether page is already visited
+                    if self._state_graph is not None:
+                        self._state_graph.record_transition(
+                            from_url=source_url,
+                            to_url=norm,
+                            trigger_action="spider_discover",
+                            trigger_label="<a> link",
+                            trigger_selector={},
+                            session_id="crawl",
+                        )
                     if _accept(norm):
                         next_level.append(norm)
                     if len(all_urls) >= max_pages:

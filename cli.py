@@ -82,6 +82,22 @@ def create_parser() -> argparse.ArgumentParser:
                         help="Output directory or file path")
     p_gen.add_argument("--language", "-l", choices=["python", "typescript"], default="python",
                         help="Output language")
+    p_gen.add_argument("--spider", action="store_true",
+                        help="Spider-crawl from --url and generate one scaffold per discovered page")
+    p_gen.add_argument("--max-pages", type=int, default=10,
+                        help="Max pages when using --spider (default: 10)")
+
+    # ── crawl ──
+    p_crawl = sub.add_parser("crawl", help="Crawl pages and build the locator database")
+    p_crawl.add_argument("--url", required=True, help="Start URL to crawl")
+    p_crawl.add_argument("--spider", action="store_true",
+                         help="Follow same-domain links (multi-page spider crawl)")
+    p_crawl.add_argument("--max-pages", type=int, default=30,
+                         help="Max pages to crawl when using --spider (default: 30)")
+    p_crawl.add_argument("--depth", type=int, default=2,
+                         help="Max link-follow depth when using --spider (default: 2)")
+    p_crawl.add_argument("--force", action="store_true",
+                         help="Re-crawl even if locator data is still fresh")
 
     # ── probe ──
     p_probe = sub.add_parser("probe", help="Validate a single selector against a live page")
@@ -141,6 +157,49 @@ def _get_db(args):
 
 
 # ---------------------------------------------------------------------------
+# Command: crawl
+# ---------------------------------------------------------------------------
+
+async def cmd_crawl(args):
+    """Crawl pages and populate the locator DB + state graph."""
+    from crawler import Crawler
+    from locator_db import LocatorDB
+    from state_graph import StateGraph
+
+    db = _get_db(args)
+    sg = StateGraph(db)
+
+    try:
+        async with Crawler(
+            db,
+            headless=_get_headless(args),
+            credentials=_load_credentials(args),
+            device=args.device,
+            state_graph=sg,
+        ) as crawler:
+            if args.spider:
+                print(f"Spider crawling from {args.url} (max {args.max_pages} pages, depth {args.depth})...")
+                results = await crawler.spider_crawl(
+                    [args.url],
+                    max_depth=args.depth,
+                    max_pages=args.max_pages,
+                    force=args.force,
+                )
+            else:
+                print(f"Crawling {args.url}...")
+                result = await crawler.crawl_url(args.url, force=args.force)
+                results = [result] if result else []
+
+        pages = len(results) if results else 0
+        total_elements = sum(r.get("element_count", 0) for r in results if isinstance(r, dict))
+        print(f"Done. Crawled {pages} page(s), stored {total_elements} element(s).")
+        return 0
+
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
 # Command: analyze
 # ---------------------------------------------------------------------------
 
@@ -165,7 +224,7 @@ async def cmd_analyze(args):
         return 0
 
     print(f"Found {len(all_selectors)} selectors across {len(files)} file(s).")
-    print(f"Probing against {args.url}...\n")
+    print(f"Probing against {args.url} (per-selector URL from page.goto() when available)...\n")
 
     db = _get_db(args)
     try:
@@ -178,7 +237,8 @@ async def cmd_analyze(args):
             results = []
             for parsed in all_selectors:
                 qapal_sel = selector_to_qapal(parsed)
-                result = await engine.probe(args.url, qapal_sel)
+                target_url = parsed.context_url or args.url
+                result = await engine.probe(target_url, qapal_sel)
                 results.append((parsed, result))
 
         # Output
@@ -272,7 +332,7 @@ async def cmd_fix(args):
         print("No Playwright selectors found.")
         return 0
 
-    print(f"Found {len(all_selectors)} selectors. Probing against {args.url}...\n")
+    print(f"Found {len(all_selectors)} selectors. Probing (per-selector URL when available)...\n")
 
     db = _get_db(args)
     patches = []
@@ -285,22 +345,30 @@ async def cmd_fix(args):
             device=args.device,
         ) as engine:
 
-            # First: probe the URL to discover available elements
-            elements = await engine.probe_url(args.url)
+            # Build element pools lazily per URL (avoids probing the same page twice)
+            url_to_elements: dict = {}
+
+            async def _get_elements(url: str):
+                if url not in url_to_elements:
+                    url_to_elements[url] = await engine.probe_url(url)
+                return url_to_elements[url]
 
             for parsed in all_selectors:
                 qapal_sel = selector_to_qapal(parsed)
-                result = await engine.probe(args.url, qapal_sel)
+                target_url = parsed.context_url or args.url
+                result = await engine.probe(target_url, qapal_sel)
 
                 # Only fix broken or weak selectors
                 if result.found and result.confidence >= args.min_confidence:
                     continue
 
+                elements = await _get_elements(target_url)
+
                 # Extract live element attributes if the selector resolves
                 element_attrs = None
                 if result.found and result.count >= 1:
                     try:
-                        element_attrs = await _extract_element_attrs(engine, args.url, qapal_sel)
+                        element_attrs = await _extract_element_attrs(engine, target_url, qapal_sel)
                     except Exception:
                         pass  # Best-effort
 
@@ -447,6 +515,28 @@ async def cmd_generate(args):
 
     db = _get_db(args)
 
+    # Determine which URLs to scaffold
+    urls_to_generate = [args.url]
+    if getattr(args, "spider", False):
+        from crawler import Crawler
+        from state_graph import StateGraph
+        sg = StateGraph(db)
+        print(f"Spider crawling from {args.url} (max {args.max_pages} pages)...")
+        async with Crawler(
+            db,
+            headless=_get_headless(args),
+            credentials=_load_credentials(args),
+            device=args.device,
+            state_graph=sg,
+        ) as crawler:
+            crawled = await crawler.spider_crawl(
+                [args.url], max_pages=args.max_pages, force=False
+            )
+        urls_to_generate = [r["url"] for r in crawled if isinstance(r, dict) and r.get("url")]
+        if not urls_to_generate:
+            urls_to_generate = [args.url]
+        print(f"Discovered {len(urls_to_generate)} page(s) to scaffold.\n")
+
     try:
         async with ProbeEngine(
             db,
@@ -454,23 +544,27 @@ async def cmd_generate(args):
             credentials=_load_credentials(args),
             device=args.device,
         ) as engine:
-            print(f"Probing {args.url}...")
-            elements = await engine.probe_url(args.url)
+            total_written = 0
+            for url in urls_to_generate:
+                print(f"Probing {url}...")
+                elements = await engine.probe_url(url)
+                if not elements:
+                    print(f"  No interactive elements found — skipping.")
+                    continue
+                output_path = generate_file(
+                    url=url,
+                    elements=elements,
+                    output_path=args.output,
+                    language=args.language,
+                )
+                actionable = [e for e in elements if e.actionable]
+                print(f"  {len(actionable)} elements → {output_path}")
+                total_written += 1
 
-        if not elements:
-            print("No interactive elements found on the page.", file=sys.stderr)
+        if total_written == 0:
+            print("No scaffold files generated.", file=sys.stderr)
             return 1
-
-        output_path = generate_file(
-            url=args.url,
-            elements=elements,
-            output_path=args.output,
-            language=args.language,
-        )
-
-        actionable = [e for e in elements if e.actionable]
-        print(f"Discovered {len(actionable)} interactive elements.")
-        print(f"Scaffold written to: {output_path}")
+        print(f"\nDone. {total_written} scaffold file(s) written.")
         return 0
 
     finally:
@@ -593,7 +687,13 @@ async def cmd_heal(args):
             device=args.device,
         ) as engine:
 
-            elements = await engine.probe_url(args.url)
+            # Build element pools lazily per URL
+            url_to_elements: dict = {}
+
+            async def _get_elements(url: str):
+                if url not in url_to_elements:
+                    url_to_elements[url] = await engine.probe_url(url)
+                return url_to_elements[url]
 
             for failure in failures:
                 file_path = failure.get("file")
@@ -611,12 +711,14 @@ async def cmd_heal(args):
                 if closest is None:
                     continue
 
+                target_url = closest.context_url or args.url
                 qapal_sel = selector_to_qapal(closest)
-                result = await engine.probe(args.url, qapal_sel)
+                result = await engine.probe(target_url, qapal_sel)
 
                 if result.found and result.confidence >= 0.5:
                     continue  # Selector works fine, failure was something else
 
+                elements = await _get_elements(target_url)
                 best_alt = _find_best_alternative(closest, elements, result)
                 if best_alt:
                     new_selector, new_confidence = best_alt
@@ -691,6 +793,7 @@ def main():
         sys.exit(1)
 
     handlers = {
+        "crawl":    cmd_crawl,
         "analyze":  cmd_analyze,
         "fix":      cmd_fix,
         "generate": cmd_generate,

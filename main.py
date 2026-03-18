@@ -251,6 +251,14 @@ def _load_credentials(args) -> Optional[dict]:
         return None
 
 
+def _get_device_args(args) -> tuple:
+    """Extract device and viewport from parsed CLI args. Returns (device, viewport)."""
+    device   = getattr(args, "device", None)
+    viewport_raw = getattr(args, "viewport", None)
+    viewport = tuple(viewport_raw) if viewport_raw else None
+    return device, viewport
+
+
 # ── Semantic pipeline helper ──────────────────────────────────────────
 
 async def _extract_semantics(db: LocatorDB, urls: List[str], headless: bool) -> int:
@@ -299,9 +307,11 @@ async def cmd_crawl(args):
 
     headless_mode = True if args.headless else None
     credentials   = _load_credentials(args)
+    device, viewport = _get_device_args(args)
     spider        = getattr(args, "spider", False)
     depth         = getattr(args, "depth", 2)
-    async with Crawler(db, headless=headless_mode, credentials=credentials, state_graph=sg) as crawler:
+    async with Crawler(db, headless=headless_mode, credentials=credentials, state_graph=sg,
+                       device=device, viewport=viewport) as crawler:
         if spider:
             results = await crawler.spider_crawl(urls, max_depth=depth, force=args.force)
         else:
@@ -420,8 +430,10 @@ async def cmd_run(args):
                  f"  [parallel={parallel}]" if parallel > 1 else "")
 
         headless_mode = True if args.headless else None
+        device, viewport = _get_device_args(args)
         async with Executor(db, headless=headless_mode, ai_client=ai,
-                            credentials=credentials, state_graph=sg) as exc:
+                            credentials=credentials, state_graph=sg,
+                            device=device, viewport=viewport) as exc:
             if parallel > 1:
                 results = await exc.run_parallel(valid_plans, concurrency=parallel)
             else:
@@ -514,6 +526,7 @@ async def cmd_prd_run(args):
 
     headless_mode   = True if args.headless else None
     credentials     = _load_credentials(args)
+    device, viewport = _get_device_args(args)
     update_baseline = getattr(args, "update_baseline", False)
 
     # --update-baseline: wipe stored baselines so the next run re-captures them
@@ -536,7 +549,8 @@ async def cmd_prd_run(args):
 
     log.info("\n [1/5] Crawling %d URL(s) to gather active locators%s...",
              len(urls), "  [spider mode]" if spider else "")
-    async with Crawler(db, headless=headless_mode, credentials=credentials, state_graph=sg) as crawler:
+    async with Crawler(db, headless=headless_mode, credentials=credentials, state_graph=sg,
+                       device=device, viewport=viewport) as crawler:
         if spider:
             crawl_results = await crawler.spider_crawl(urls, max_depth=depth, force=args.force)
             urls = list({r["url"] for r in crawl_results if r.get("crawled")} | set(urls))
@@ -633,6 +647,11 @@ async def cmd_prd_run(args):
             log.warning("\n No valid plans generated for %s.", prd_path.name)
             continue
 
+        # Optional codegen
+        if getattr(args, "codegen", False):
+            plan_paths = [str(output_dir / f"{p.get('test_id', 'unknown')}_plan.json") for p in valid_plans]
+            _run_codegen_on_plans(plan_paths)
+
         # 4. Execute
         parallel = getattr(args, "parallel", 1) or 1
         get_token_tracker().reset()   # measure AI tokens consumed by recovery during execution
@@ -641,7 +660,8 @@ async def cmd_prd_run(args):
                  f"  [parallel={parallel}]" if parallel > 1 else "")
 
         async with Executor(db, headless=headless_mode, ai_client=ai,
-                            credentials=credentials, state_graph=sg) as exc:
+                            credentials=credentials, state_graph=sg,
+                            device=device, viewport=viewport) as exc:
             if parallel > 1:
                 results = await exc.run_parallel(valid_plans, concurrency=parallel)
                 all_results.extend(results)
@@ -720,6 +740,132 @@ async def cmd_compile(args):
     return 0
 
 
+# ── Codegen command ───────────────────────────────────────────────────
+
+async def cmd_codegen(args):
+    """Convert JSON test plans to standalone pytest-playwright .py files."""
+    from codegen import codegen_plans
+
+    plan_paths = args.plans
+    output_dir = getattr(args, "output", "tests/generated") or "tests/generated"
+
+    log.info("\n [codegen] Converting %d plan(s) → %s/", len(plan_paths), output_dir)
+    results = codegen_plans(plan_paths, output_dir)
+    log.info("\n Generated %d pytest file(s) in %s/", len(results), output_dir)
+
+    for r in results:
+        log.info("   %s", r)
+    return 0
+
+
+def _run_codegen_on_plans(plan_paths, output_dir="tests/generated"):
+    """Helper: run codegen on a list of plan file paths."""
+    from codegen import codegen_plans
+    results = codegen_plans(plan_paths, output_dir)
+    if results:
+        log.info("\n [codegen] Generated %d pytest file(s) → %s/", len(results), output_dir)
+        for r in results:
+            log.info("   %s", r)
+
+
+# ── Generate command (unified: PRD / text / auto-discover) ────────────
+
+async def cmd_generate(args):
+    """Generate test plans without executing them."""
+    from feature_generator import FeatureTestGenerator
+    from state_graph import StateGraph
+
+    ai = _get_ai_client()
+    if not ai:
+        log.error("QAPAL_AI_PROVIDER environment variable is required for generate.")
+        return 1
+
+    urls        = args.url
+    db          = LocatorDB()
+    sg          = StateGraph(db)
+    credentials = _load_credentials(args)
+    device, viewport = _get_device_args(args)
+    headless_mode = True if args.headless else None
+    num_tests     = getattr(args, "num_tests", None)
+    neg_tests     = getattr(args, "negative_tests", False)
+    max_locators  = getattr(args, "max_locators", 400)
+    output_dir    = Path(args.output) if args.output else Path("plans")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Crawl
+    spider = getattr(args, "spider", False)
+    depth  = getattr(args, "depth", 2)
+    if not spider and sg.stats().get("unique_pages", 0) < 3:
+        log.info("\n [auto] Nav graph sparse — enabling --spider.")
+        spider = True
+
+    log.info("\n [1/3] Crawling %d URL(s)...", len(urls))
+    async with Crawler(db, headless=headless_mode, credentials=credentials,
+                       state_graph=sg, device=device, viewport=viewport) as crawler:
+        if spider:
+            results = await crawler.spider_crawl(urls, max_depth=depth, force=args.force)
+            urls = list({r["url"] for r in results if r.get("crawled")} | set(urls))
+        else:
+            await crawler.bulk_crawl(urls, force=args.force)
+
+    # 2. Semantic extraction
+    headless_bool = headless_mode if headless_mode is not None else True
+    log.info("\n [2/3] Extracting semantic context...")
+    await _extract_semantics(db, urls, headless=headless_bool)
+
+    # 3. Generate
+    log.info("\n [3/3] Generating test plans...")
+    gen = FeatureTestGenerator(
+        db=db, ai_client=ai, state_graph=sg,
+        num_tests=num_tests, max_locators=max_locators,
+        negative_tests=neg_tests,
+    )
+
+    # Mode selection
+    prd_files = getattr(args, "prd", None)
+    text      = getattr(args, "text", None)
+    text_file = getattr(args, "text_file", None)
+
+    all_plans = []
+    if prd_files:
+        # PRD mode
+        for prd_path in [Path(p) for p in prd_files]:
+            prd_content = prd_path.read_text()
+            plans = gen.generate_from_prd(prd_content, urls, credentials)
+            all_plans.extend(plans)
+            log.info("   PRD %s → %d plan(s)", prd_path.name, len(plans))
+    elif text or text_file:
+        # Plain text mode
+        if text_file:
+            text = Path(text_file).read_text()
+        plans = gen.generate_from_text(text, urls, credentials)
+        all_plans.extend(plans)
+        log.info("   text → %d plan(s)", len(plans))
+    else:
+        # Auto-discover mode
+        plans = gen.generate_from_discovery(urls, credentials)
+        all_plans.extend(plans)
+        log.info("   discovery → %d plan(s)", len(plans))
+
+    # Save plans
+    for plan in all_plans:
+        tc_id = plan.get("test_id", plan.get("id", "unknown"))
+        out_path = output_dir / f"{tc_id}.json"
+        with open(out_path, "w") as f:
+            json.dump(plan, f, indent=2)
+        log.info("   saved: %s", out_path)
+
+    log.info("\n Generated %d plan(s) → %s/", len(all_plans), output_dir)
+
+    # Optional codegen
+    if getattr(args, "codegen", False) and all_plans:
+        plan_paths = [str(output_dir / f"{p.get('test_id', p.get('id', 'unknown'))}.json") for p in all_plans]
+        _run_codegen_on_plans(plan_paths, str(output_dir.parent / "tests" / "generated"))
+
+    db.close()
+    return 0
+
+
 # ── Graph-crawl command ───────────────────────────────────────────────
 
 async def cmd_graph_crawl(args):
@@ -738,6 +884,7 @@ async def cmd_graph_crawl(args):
     depth       = args.depth
     headless    = bool(args.headless)
     credentials = _load_credentials(args)
+    device, viewport = _get_device_args(args)
 
     db = LocatorDB()
     sg = StateGraph(db)
@@ -756,6 +903,18 @@ async def cmd_graph_crawl(args):
         pw.selectors.set_test_id_attribute("data-test")
         browser = await pw.chromium.launch(headless=headless)
 
+        # Resolve device emulation kwargs
+        _device_kwargs = {}
+        if device:
+            try:
+                _device_kwargs = dict(pw.devices[device])
+            except KeyError:
+                available = ", ".join(sorted(pw.devices.keys())[:10])
+                log.error("Unknown device '%s'. Examples: %s...", device, available)
+                return 1
+        if viewport:
+            _device_kwargs["viewport"] = {"width": viewport[0], "height": viewport[1]}
+
         async def _visit(url: str, current_depth: int):
             nonlocal pages_done
             from crawler import _build_context, crawl_page, wait_for_stable
@@ -764,7 +923,7 @@ async def cmd_graph_crawl(args):
                 return []
             visited.add(norm)
 
-            ctx  = await _build_context(browser, db, url, credentials)
+            ctx  = await _build_context(browser, db, url, credentials, _device_kwargs)
             page = await ctx.new_page()
             discovered = []
             try:
@@ -1101,6 +1260,13 @@ def main():
     )
     sub = parser.add_subparsers(dest="cmd")
 
+    def _add_device_args(p):
+        """Add --device and --viewport flags to a subparser."""
+        p.add_argument("--device", default=None,
+                       help="Playwright device preset (e.g. 'iPhone 12', 'Pixel 5', 'iPad Pro')")
+        p.add_argument("--viewport", nargs=2, type=int, metavar=("W", "H"),
+                       help="Custom viewport width and height (overrides device default)")
+
     # crawl
     p = sub.add_parser("crawl", help="Crawl pages and populate the locator DB")
     p.add_argument("--urls",  "-u", nargs="+", required=True, help="URLs to crawl")
@@ -1112,6 +1278,7 @@ def main():
                    help="Follow links and crawl the whole site from the starting URLs")
     p.add_argument("--depth", type=int, default=2, metavar="N",
                    help="Max link-follow depth for --spider (default: 2)")
+    _add_device_args(p)
 
     # plan
     p = sub.add_parser("plan", help="Generate execution plans from test cases")
@@ -1128,6 +1295,7 @@ def main():
                    help="JSON file with login credentials (url, username, password, selectors)")
     p.add_argument("--parallel", "-j", type=int, default=1, metavar="N",
                    help="Run N tests concurrently (default: 1 = sequential)")
+    _add_device_args(p)
 
     # prd-run
     p = sub.add_parser("prd-run", help="Generate test plans from a PRD and run them immediately")
@@ -1155,16 +1323,52 @@ def main():
                    help="Compile locator DB to compact model before planning (saves tokens)")
     p.add_argument("--parallel", "-j", type=int, default=1, metavar="N",
                    help="Run N tests concurrently (default: 1 = sequential)")
+    p.add_argument("--codegen", action="store_true",
+                   help="Also generate standalone pytest-playwright .py files")
+    _add_device_args(p)
 
     # compile
     p = sub.add_parser("compile", help="Compile locator DB into a compact compiled_model.json")
     p.add_argument("--output", "-o", default="compiled_model.json",
                    help="Output path (default: compiled_model.json)")
 
+    # generate (unified: PRD, plain text, or auto-discover)
+    p = sub.add_parser("generate", help="Generate test plans from PRD, plain text, or auto-discovery")
+    p.add_argument("--url", "-u", nargs="+", required=True, help="Base URLs to crawl for locators")
+    p.add_argument("--prd", nargs="+", help="PRD markdown file(s) — triggers PRD mode")
+    p.add_argument("--text", help="Plain text test descriptions (e.g. 'test login with wrong password')")
+    p.add_argument("--text-file", dest="text_file", help="File containing plain text test descriptions")
+    p.add_argument("--num-tests", dest="num_tests", type=int, default=None, metavar="N",
+                   help="Number of test cases to generate (default: 5)")
+    p.add_argument("--negative-tests", dest="negative_tests", action="store_true",
+                   help="Also generate negative and boundary test cases")
+    p.add_argument("--output", "-o", help="Output directory for plans (default: plans/)")
+    p.add_argument("--force", "-f", action="store_true", help="Force re-crawl even if fresh")
+    p.add_argument("--headless", "-H", action="store_true", help="Run browser in headless mode")
+    p.add_argument("--spider", action="store_true",
+                   help="Follow links and crawl the site from the starting URLs")
+    p.add_argument("--depth", type=int, default=2, metavar="N",
+                   help="Max link-follow depth for --spider (default: 2)")
+    p.add_argument("--credentials-file", dest="credentials_file", metavar="FILE",
+                   help="JSON file with login credentials")
+    p.add_argument("--max-locators", dest="max_locators", type=int, default=400, metavar="N",
+                   help="Max locators sent to AI (default: 400)")
+    p.add_argument("--codegen", action="store_true",
+                   help="Also generate standalone pytest-playwright .py files")
+    _add_device_args(p)
+
+    # codegen
+    p = sub.add_parser("codegen", help="Convert JSON test plans to standalone pytest-playwright .py files")
+    p.add_argument("--plans", "-p", nargs="+", required=True,
+                   help="JSON plan file(s) to convert")
+    p.add_argument("--output", "-o", default="tests/generated",
+                   help="Output directory for .py files (default: tests/generated/)")
+
     # semantic
     p = sub.add_parser("semantic", help="Extract semantic context for URLs (run after crawl, before plan)")
     p.add_argument("--urls",     "-u", nargs="+", required=True, help="URLs to process")
     p.add_argument("--headless", "-H", action="store_true",       help="Run browser in headless mode")
+    _add_device_args(p)
 
     # graph-crawl
     p = sub.add_parser("graph-crawl", help="Navigate the site, record transitions into the State Graph, crawl each page for locators")
@@ -1174,6 +1378,7 @@ def main():
     p.add_argument("--headless", "-H", action="store_true", help="Run browser in headless mode")
     p.add_argument("--credentials-file", dest="credentials_file", metavar="FILE",
                    help="JSON file with login credentials")
+    _add_device_args(p)
 
     # explore
     p = sub.add_parser("explore", help="Autonomously explore an app with vision-guided navigation")
@@ -1185,6 +1390,7 @@ def main():
     p.add_argument("--headless", "-H", action="store_true", help="Run browser in headless mode")
     p.add_argument("--credentials-file", dest="credentials_file", metavar="FILE",
                    help="JSON file with login credentials")
+    _add_device_args(p)
 
     # ux-audit
     p = sub.add_parser("ux-audit", help="Run UX heuristic evaluation on one or more URLs")
@@ -1194,6 +1400,7 @@ def main():
                    help="JSON file with login credentials")
     p.add_argument("--static", action="store_true",
                    help="Static audit only — use locator DB, no browser or vision")
+    _add_device_args(p)
 
     # status
     sub.add_parser("status", help="Show DB and AI client status")
@@ -1238,6 +1445,10 @@ def main():
             return asyncio.run(cmd_explore(args))
         elif args.cmd == "ux-audit":
             return asyncio.run(cmd_ux_audit(args))
+        elif args.cmd == "generate":
+            return asyncio.run(cmd_generate(args))
+        elif args.cmd == "codegen":
+            return asyncio.run(cmd_codegen(args))
     except KeyboardInterrupt:
         log.warning("\nInterrupted.")
         return 130

@@ -188,10 +188,10 @@ Strategy scores:
 
 ```
 qapal analyze <files> --url <url> [--format table|json|github]
-qapal fix     <files> --url <url> [--dry-run|--apply|--pr] [--min-confidence 0.8]
+qapal fix     <files> --url <url> [--dry-run|--apply|--pr] [--min-confidence 0.8] [--ai-fallback]
 qapal generate        --url <url> [--output dir] [--language python|typescript]
 qapal probe   "<sel>" --url <url>
-qapal heal    --test-results <json> --url <url> [--pr]
+qapal heal    --test-results <json> --url <url> [--pr] [--ai-fallback]
 ```
 
 ### Global Options
@@ -204,6 +204,28 @@ qapal heal    --test-results <json> --url <url> [--pr]
 | `--credentials-file` | JSON file with login credentials |
 | `--timeout` | Action timeout in ms (default: 10000) |
 | `--db-path` | Path to locator DB (default: `locators.json`) |
+| `--ai-fallback` | Enable LLM inference for selectors with no semantic hint (requires `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`) |
+
+### `--ai-fallback` — LLM-Powered Recovery
+
+By default QAPAL is **fully deterministic**: it only upgrades selectors it can semantically match against the live accessibility tree.
+When a selector has completely degraded into an unreadable CSS path with zero accessible name, the deterministic engine correctly refuses to guess.
+
+Pass `--ai-fallback` to unlock one-shot LLM inference for those cases:
+
+```bash
+qapal fix tests/ --url https://github.com --apply --ai-fallback
+```
+
+```
+# Before (unreadable CSS path — deterministic engine refuses to touch it)
+page.locator("qbsearch-input > div.search-input > button > span.flex-1")
+
+# After --ai-fallback (LLM deduced intent from accessibility snapshot)
+page.get_by_role("button", name="Search or jump to…")   [B — 0.79]
+```
+
+> **Safety contract:** `--ai-fallback` is opt-in and scoped to selectors the deterministic engine explicitly cannot resolve. It never overrides a selector that already has a confident match.
 
 ### GitHub Actions Output
 
@@ -343,6 +365,87 @@ playwright install chromium
 | `QAPAL_AI_PROVIDER` | `anthropic` | AI provider: `anthropic`, `openai`, `grok` |
 | `ANTHROPIC_API_KEY` | - | Required for AI rediscovery with Claude |
 | `OPENAI_API_KEY` | - | Required for AI rediscovery with GPT-4 |
+
+---
+
+## Battle-Tested: Real-World Validation
+
+The following results were produced against live, public websites to validate correctness and safety of the locator engine.
+
+### ✅ TodoMVC — CSS → Semantic upgrade
+
+```
+Site: demo.playwright.dev/todomvc/
+```
+
+```python
+# Before — brittle CSS class
+page.locator(".new-todo").fill("Buy milk")
+
+# After qapal fix --apply — semantic, resilient
+page.get_by_role("textbox", name="What needs to be done?").fill("Buy milk")
+```
+
+Grade improvement: `[B — 0.70]` → `[A — 0.88]`
+
+---
+
+### ✅ SauceDemo — Auth-gated app
+
+```
+Site: saucedemo.com (login required)
+```
+
+| Selector | Before | After |
+|----------|--------|-------|
+| `.input_error.form_input` | `[F — 0.00]` broken | `page.get_by_test_id("username")` `[A — 0.95]` |
+| `input[type='password']` | `[D — 0.35]` fragile | `page.get_by_test_id("password")` `[A — 0.95]` |
+| `.btn_inventory` (post-login button, probed from homepage) | `[F — 0.00]` correctly refused | no false-positive patch generated |
+
+QAPAL correctly identified that `.btn_inventory` is a **valid element but unreachable** from the homepage URL — it refused to patch rather than guess.
+
+---
+
+### ✅ BooksToScrape — Deep DOM hierarchy
+
+```
+Site: books.toscrape.com (multi-page, no auth)
+```
+
+```python
+# Before — structurally fragile, breaks on any nav reorder
+page.locator(".nav-list > li > ul > li:nth-child(3) > a")
+
+# After — semantic link, stable across DOM changes
+page.get_by_role("link", name="Historical Fiction")   [A — 0.88]
+```
+
+A downstream `#content_inner > article > p` content selector was left **untouched** — QAPAL understood it was outside the semantic domain of the probe URL and avoided false-positive remediation.
+
+---
+
+### 🛡️ Safety validation — GitHub & Wikipedia
+
+To verify the engine does not hallucinate fixes, completely unreadable CSS paths with zero accessible names were tested:
+
+```python
+# GitHub — structurally opaque path
+page.locator("qbsearch-input > div.search-input > button > span.flex-1")
+# Result: [F — 0.00] — correctly refused to patch (no semantic hint)
+
+# Wikipedia — positional path
+page.locator("div#mw-content-text > div.mw-content-ltr > div > ul:nth-child(5) > li:nth-child(2) > a")
+# Result: [F — 0.00] — correctly refused to patch (no semantic hint)
+```
+
+With `--ai-fallback` enabled, the LLM recovered both:
+
+```python
+# GitHub → page.get_by_role("button", name="Search or jump to…")   [B — 0.79]
+# Wikipedia → page.get_by_role("link", name="County Cavan")         [B — 0.79]
+```
+
+This validates the safety contract: **determinism prevents false positives; `--ai-fallback` recovers what determinism deliberately ignores.**
 
 ---
 

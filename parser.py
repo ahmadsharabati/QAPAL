@@ -36,9 +36,14 @@ class ParsedSelector:
     action: Optional[str]       # "click", "fill", "type", etc. or None
     language: str               # "python" | "typescript"
     raw_line: str = ""          # full source line
+    context_url: Optional[str] = None  # URL from nearest preceding page.goto() call
 
     def __repr__(self) -> str:
         return f"ParsedSelector(L{self.line_number}, {self.selector_type}={self.value!r})"
+
+
+# Detects page.goto("https://...") — both Python and TypeScript
+_GOTO_RE = re.compile(r'\.goto\s*\(\s*["\']([^"\']+)["\']')
 
 
 # ---------------------------------------------------------------------------
@@ -265,8 +270,17 @@ def parse_file(file_path: str) -> List[ParsedSelector]:
     if buffer:
         joined_lines.append((buffer_start, buffer))
 
+    current_url: Optional[str] = None
     for line_num, joined_line in joined_lines:
-        results.extend(_parse_line(joined_line, line_num, str(path), language))
+        # Track page.goto() calls to assign context_url to subsequent selectors
+        goto_match = _GOTO_RE.search(joined_line)
+        if goto_match:
+            current_url = goto_match.group(1)
+
+        parsed_selectors = _parse_line(joined_line, line_num, str(path), language)
+        for sel in parsed_selectors:
+            sel.context_url = current_url
+        results.extend(parsed_selectors)
 
     return results
 
