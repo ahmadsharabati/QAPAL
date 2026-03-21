@@ -1,0 +1,2 @@
+strict mode violation: getByRole('button', { name: 'Save' }) resolved to 3 elements
+  at tests/settings.spec.ts:5:52

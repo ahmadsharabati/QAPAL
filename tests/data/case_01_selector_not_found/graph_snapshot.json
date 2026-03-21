@@ -1,0 +1,16 @@
+{
+  "node_id": "n-products",
+  "url": "https://shop.example.com/products",
+  "elements": {
+    "add-btn": {
+      "element_id": "add-btn",
+      "tag": "button",
+      "accessible_name": "Add to cart",
+      "role": "button",
+      "locators": [
+        {"strategy": "testid", "value": "add-to-cart-btn", "confidence": 0.99, "uniqueness": 1.0, "visibility": 1.0},
+        {"strategy": "role", "value": "button: Add to cart", "confidence": 0.85, "uniqueness": 0.8, "visibility": 1.0}
+      ]
+    }
+  }
+}

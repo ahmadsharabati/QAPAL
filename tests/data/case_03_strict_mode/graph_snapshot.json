@@ -1,0 +1,25 @@
+{
+  "node_id": "n-settings",
+  "url": "https://app.example.com/settings",
+  "elements": {
+    "save-settings": {
+      "element_id": "save-settings",
+      "tag": "button",
+      "accessible_name": "Save changes",
+      "role": "button",
+      "locators": [
+        {"strategy": "testid", "value": "save-settings-btn", "confidence": 0.99, "uniqueness": 1.0, "visibility": 1.0},
+        {"strategy": "role", "value": "button: Save changes", "confidence": 0.85, "uniqueness": 0.33, "visibility": 1.0}
+      ]
+    },
+    "save-profile": {
+      "element_id": "save-profile",
+      "tag": "button",
+      "accessible_name": "Save profile",
+      "role": "button",
+      "locators": [
+        {"strategy": "testid", "value": "save-profile-btn", "confidence": 0.99, "uniqueness": 1.0, "visibility": 1.0}
+      ]
+    }
+  }
+}
