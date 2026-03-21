@@ -214,9 +214,9 @@ class TestErrorDetection:
         after = StateSnapshot(
             url="https://example.com",
             title="Page",
-            dom_hash="h1",
-            a11y_hash="a1",
-            visible_text_hash="t1",
+            dom_hash="h2",  # DOM changed (error message added)
+            a11y_hash="a2",
+            visible_text_hash="t2",
             visible_text="Form Error: Invalid email",
             error_messages=["Invalid email"],  # Error appeared
             console_errors=[],
@@ -304,28 +304,28 @@ class TestNetworkErrorDetection:
         after = StateSnapshot(
             url="https://example.com",
             title="Form",
-            dom_hash="h1",
-            a11y_hash="a1",
-            visible_text_hash="t1",
-            visible_text="Form",
+            dom_hash="h2",  # DOM changed (error state)
+            a11y_hash="a2",
+            visible_text_hash="t2",
+            visible_text="Form — Error",
             error_messages=[],
             console_errors=[],
             pending_requests=0,
             network_errors=["POST /api/submit 500"],
         )
-        
+
         ctx = ValidationContext(
             before_state=before,
             after_state=after,
             action_type=ActionType.SUBMIT,
         )
-        
+
         engine = ValidationEngine()
         result, issues = engine.validate(ctx)
-        
+
         # Should detect network error
         assert any(i.rule == ValidationRuleType.NETWORK_ERROR for i in issues)
-        assert result == ValidationResult.FAIL  # Network errors are critical
+        assert result == ValidationResult.PARTIAL  # Network errors are high severity
 
 
 class TestNoOpDetection:

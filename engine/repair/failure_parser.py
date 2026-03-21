@@ -92,7 +92,7 @@ _RE_TIMEOUT_LOCATOR = re.compile(
 
 # Locator text extraction (various patterns)
 _RE_LOCATOR_GETBY = re.compile(
-    r"(getBy(?:Role|TestId|Text|Label|Placeholder|AltText|Title))\s*\(\s*['\"]?([^'\")\n]+)['\"]?"
+    r"(getBy(?:Role|TestId|Text|Label|Placeholder|AltText|Title))\s*\(([^)]+)\)"
 )
 
 _RE_LOCATOR_CSS = re.compile(
@@ -287,7 +287,8 @@ class FailureParser:
         # Try getBy* patterns first
         match = _RE_LOCATOR_GETBY.search(text)
         if match:
-            return match.group(1), match.group(2).strip()
+            raw = match.group(2).strip().strip("'\"")
+            return match.group(1), raw
         
         # Try CSS locator
         match = _RE_LOCATOR_CSS.search(text)
@@ -303,7 +304,8 @@ class FailureParser:
         if test_code:
             match = _RE_LOCATOR_GETBY.search(test_code)
             if match:
-                return match.group(1), match.group(2).strip()
+                raw = match.group(2).strip().strip("'\"")
+                return match.group(1), raw
             
             match = _RE_LOCATOR_CSS.search(test_code)
             if match:
