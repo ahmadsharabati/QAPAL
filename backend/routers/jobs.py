@@ -12,7 +12,7 @@ from backend.models import Job, User
 from backend.schemas import JobCreate, JobResponse, JobListResponse
 from backend.services.auth import get_current_user
 from backend.services.quota import check_quota, increment_usage
-from backend.worker import run_scan_stub
+from backend.worker import run_deep_scan
 
 router = APIRouter(prefix="/v1/jobs", tags=["jobs"])
 
@@ -70,7 +70,7 @@ def create_job(
     db.refresh(job)
 
     # Launch background task
-    background_tasks.add_task(run_scan_stub, job.id)
+    background_tasks.add_task(run_deep_scan, job.id)
 
     return job
 

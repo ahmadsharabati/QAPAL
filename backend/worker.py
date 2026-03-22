@@ -1,119 +1,497 @@
 """
-Worker — MVP lifecycle stub.
+Worker — Deep Scan pipeline.
 
-Simulates the scan lifecycle and produces a placeholder report.
-Exercises job state transitions (queued → running → complete/failed)
-and report plumbing WITHOUT running the real engine yet.
+Replaces the lifecycle stub with real QAPAL engine integration:
+  crawl → auto-PRD → plan → execute → report
 
-Phase 4 will swap this stub with real engine execution.
+Called by BackgroundTasks.add_task(run_deep_scan, job_id).
+Each job is fully isolated with its own temp LocatorDB.
 """
 
-import time
+import sys
+import os
+import asyncio
 import logging
+import time
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import List, Optional
+
+# Ensure the QAPAL engine root is importable
+_ENGINE_ROOT = str(Path(__file__).resolve().parent.parent)
+if _ENGINE_ROOT not in sys.path:
+    sys.path.insert(0, _ENGINE_ROOT)
 
 from backend.database import SessionLocal
 from backend.models import Job
+from backend.config import settings
 
-logger = logging.getLogger("qapal.worker")
+_base_logger = logging.getLogger("qapal.worker")
 
 
-def _placeholder_report(url: str, duration_ms: int) -> dict:
+def _job_logger(job_id: str) -> logging.LoggerAdapter:
+    """Create a logger that auto-tags every message with the job ID."""
+    return logging.LoggerAdapter(_base_logger, {"job_id": job_id})
+
+
+# ── Job DB helpers ───────────────────────────────────────────────────────
+
+
+def _update_job(job_id: str, log: Optional[logging.LoggerAdapter] = None, **fields) -> None:
+    """Open a fresh DB session, update specified fields, commit, close."""
+    _log = log or _base_logger
+    session = SessionLocal()
+    try:
+        job = session.query(Job).filter(Job.id == job_id).first()
+        if not job:
+            return
+        for key, value in fields.items():
+            if key == "state":
+                job.transition(value)
+            else:
+                setattr(job, key, value)
+        session.commit()
+    except Exception:
+        _log.exception("Failed to update job %s", job_id)
+        session.rollback()
+    finally:
+        session.close()
+
+
+def _get_job_info(job_id: str) -> tuple:
+    """Return (url, options) for a job."""
+    session = SessionLocal()
+    try:
+        job = session.query(Job).filter(Job.id == job_id).first()
+        if not job:
+            raise RuntimeError(f"Job {job_id} not found")
+        return job.url, job.options or {}
+    finally:
+        session.close()
+
+
+# ── Auto-PRD generation ─────────────────────────────────────────────────
+
+
+def _build_auto_prd(locator_db, url: str, crawl_results: list) -> str:
     """
-    Generate a placeholder report that matches the expected shape.
-    The extension UI can render this shape immediately.
+    Synthesize a smoke-test PRD from crawl results.
+
+    Inspects discovered locators to build test cases for:
+    - Page loads and title
+    - Navigation links (if found)
+    - Forms (if found)
+    - Buttons/interactive elements (fallback)
     """
-    return {
-        "summary": f"Scan completed for {url} (simulated)",
-        "score": 85,
-        "issues": [
-            {
-                "id": "sim-001",
-                "severity": "medium",
-                "rule": "PLACEHOLDER",
-                "message": "This is a simulated issue for lifecycle validation",
-                "page": url,
+    crawled_urls = [r["url"] for r in crawl_results if r.get("crawled")]
+
+    lines = [
+        f"# Smoke Test for {url}",
+        "",
+        "## Test Scope",
+        f"Verify the basic functionality of {url}.",
+        "",
+        "## Test Cases",
+        "",
+        "### TC1: Page loads and core elements are visible",
+        f"- Navigate to {url}",
+        "- Verify the page loads without errors",
+        "- Verify the page title is non-empty",
+        "- Verify the main content area is visible",
+    ]
+
+    # Discover page structure from locators
+    all_locs = locator_db.get_all_locators(valid_only=True)
+    forms = [l for l in all_locs if l.get("role") in ("textbox", "combobox", "searchbox")]
+    nav_links = [l for l in all_locs if l.get("role") == "link" and l.get("container") == "nav"]
+    buttons = [l for l in all_locs if l.get("role") == "button"]
+
+    if nav_links:
+        lines.append("")
+        lines.append("### TC2: Navigation links are functional")
+        lines.append("- Click primary navigation links and verify pages load")
+        for link in nav_links[:3]:
+            name = link.get("name", "")
+            if name:
+                lines.append(f"- Navigation link: \"{name}\"")
+
+    if forms:
+        lines.append("")
+        tc_num = "TC3" if nav_links else "TC2"
+        lines.append(f"### {tc_num}: Forms are interactable")
+        lines.append("- Locate form inputs on the page")
+        lines.append("- Verify form elements are visible and enabled")
+        for inp in forms[:5]:
+            name = inp.get("name", "")
+            if name:
+                lines.append(f"- Form field: \"{name}\"")
+
+    if not nav_links and not forms and buttons:
+        lines.append("")
+        lines.append("### TC2: Interactive elements are present")
+        lines.append(f"- Verify at least {min(len(buttons), 3)} buttons are visible")
+        for btn in buttons[:3]:
+            name = btn.get("name", "")
+            if name:
+                lines.append(f"- Button: \"{name}\"")
+
+    # Discovered pages context
+    if len(crawled_urls) > 1:
+        lines.append("")
+        lines.append("## Discovered Pages")
+        for page_url in crawled_urls[:10]:
+            page_locs = locator_db.get_all(page_url, valid_only=True)
+            lines.append(f"- {page_url} ({len(page_locs)} elements)")
+
+    return "\n".join(lines)
+
+
+# ── Issue extraction ─────────────────────────────────────────────────────
+
+
+def _extract_issues(exec_results: list) -> list:
+    """
+    Map executor results to the Issue[] schema.
+
+    Maps:
+    - Failed navigation steps → critical / NAVIGATION_FAILURE
+    - Failed interaction steps → high / INTERACTION_FAILURE
+    - Failed URL assertions → critical / URL_ASSERTION_FAILED
+    - Failed element assertions → high / ELEMENT_ASSERTION_FAILED
+    - Console errors → medium / CONSOLE_ERROR
+    - JS exceptions → high / JS_EXCEPTION
+    - Network failures → medium / NETWORK_FAILURE
+    """
+    issues = []
+    counter = 0
+
+    for result in exec_results:
+        tc_id = result.get("id", "?")
+        test_url = ""
+
+        # Step failures
+        for step in result.get("steps", []):
+            if step.get("action") == "navigate":
+                test_url = step.get("url", test_url)
+
+            if step.get("status") != "fail":
+                continue
+
+            counter += 1
+            action = step.get("action", "unknown")
+            is_nav = action == "navigate"
+            issues.append({
+                "id": f"issue-{counter:03d}",
+                "severity": "critical" if is_nav else "high",
+                "rule": "NAVIGATION_FAILURE" if is_nav else "INTERACTION_FAILURE",
+                "message": f"[{tc_id}] {action} failed: {step.get('reason', 'unknown')}",
+                "page": test_url or "unknown",
+                "element": step.get("selector_used") if isinstance(step.get("selector_used"), str) else None,
+            })
+
+        # Assertion failures
+        for assertion in result.get("assertions", []):
+            if assertion.get("status") != "fail":
+                continue
+
+            counter += 1
+            atype = assertion.get("type", "unknown")
+            is_url = atype.startswith("url_")
+            expected = assertion.get("expected", assertion.get("value", "?"))
+            actual = assertion.get("actual", "?")
+            issues.append({
+                "id": f"issue-{counter:03d}",
+                "severity": "critical" if is_url else "high",
+                "rule": "URL_ASSERTION_FAILED" if is_url else "ELEMENT_ASSERTION_FAILED",
+                "message": f"[{tc_id}] {atype}: expected={expected}, actual={actual}",
+                "page": test_url or "unknown",
                 "element": None,
-            }
-        ],
-        "critical_count": 0,
-        "high_count": 0,
-        "medium_count": 1,
-        "pages_crawled": 1,
-        "actions_taken": 0,
+            })
+
+        # Passive errors
+        passive = result.get("passive_errors", {})
+
+        for err in passive.get("console_errors", [])[:10]:  # cap at 10
+            counter += 1
+            issues.append({
+                "id": f"issue-{counter:03d}",
+                "severity": "medium",
+                "rule": "CONSOLE_ERROR",
+                "message": f"[{tc_id}] Console error: {str(err.get('text', ''))[:200]}",
+                "page": err.get("url", test_url) or "unknown",
+                "element": None,
+            })
+
+        for err in passive.get("js_exceptions", [])[:5]:
+            counter += 1
+            issues.append({
+                "id": f"issue-{counter:03d}",
+                "severity": "high",
+                "rule": "JS_EXCEPTION",
+                "message": f"[{tc_id}] JS exception: {str(err)[:200]}",
+                "page": test_url or "unknown",
+                "element": None,
+            })
+
+        for err in passive.get("network_failures", [])[:10]:
+            counter += 1
+            issues.append({
+                "id": f"issue-{counter:03d}",
+                "severity": "medium",
+                "rule": "NETWORK_FAILURE",
+                "message": f"[{tc_id}] Network failure: {err.get('url', '')} ({err.get('failure', '')})",
+                "page": test_url or "unknown",
+                "element": None,
+            })
+
+    return issues
+
+
+# ── Scoring ──────────────────────────────────────────────────────────────
+
+
+def _calculate_score(issues: list) -> int:
+    """Deterministic score from issue severities. 0-100, higher is better."""
+    weights = {"critical": 25, "high": 10, "medium": 3, "low": 1}
+    deductions = sum(weights.get(i["severity"], 0) for i in issues)
+    return max(0, 100 - deductions)
+
+
+# ── Report assembly ──────────────────────────────────────────────────────
+
+
+def _build_report(
+    url: str,
+    crawl_results: list,
+    exec_results: list,
+    duration_ms: int,
+    timeout_stage: Optional[str] = None,
+) -> dict:
+    """
+    Assemble the final Report dict matching the extension's Report interface.
+
+    Both Quick Scan and Deep Scan produce the same shape so the popup UI
+    renders them identically.
+
+    Args:
+        timeout_stage: If set, the pipeline stage that timed out (e.g. "crawl", "execute").
+    """
+    issues = _extract_issues(exec_results)
+    score = _calculate_score(issues)
+
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    for issue in issues:
+        sev = issue["severity"]
+        if sev in counts:
+            counts[sev] += 1
+
+    passed = sum(1 for r in exec_results if r.get("status") == "pass")
+    failed = sum(1 for r in exec_results if r.get("status") == "fail")
+    pages = sum(1 for r in crawl_results if r.get("crawled"))
+    actions = sum(len(r.get("steps", [])) for r in exec_results)
+
+    summary = f"Deep Scan: {passed} passed, {failed} failed across {pages} pages"
+    if timeout_stage:
+        summary += f" (timed out during {timeout_stage}, partial results)"
+
+    return {
+        "summary": summary,
+        "score": score,
+        "issues": issues,
+        "critical_count": counts["critical"],
+        "high_count": counts["high"],
+        "medium_count": counts["medium"],
+        "pages_crawled": pages,
+        "actions_taken": actions,
         "duration_ms": duration_ms,
-        "engine_version": "stub-1.0",
+        "engine_version": "deep-1.0",
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
-def run_scan_stub(job_id: str) -> None:
-    """
-    Background task: simulate the scan lifecycle.
+# ── Main pipeline ────────────────────────────────────────────────────────
 
-    This is a lifecycle stub — it validates that:
-    1. Jobs transition correctly (queued → running → complete)
-    2. Progress updates flow to the database
-    3. Reports are attached in the expected shape
-    4. The polling API can observe each stage
 
-    No real crawling, no Playwright, no network access.
+async def run_deep_scan(job_id: str) -> None:
     """
-    db = SessionLocal()
+    Main Deep Scan pipeline. Called by BackgroundTasks.add_task().
+
+    Pipeline: crawl → auto-PRD → plan (1 AI call) → execute (0 AI calls) → report.
+    Each job gets an isolated temp LocatorDB. Cleaned up on exit.
+    """
+    from locator_db import LocatorDB
+    from crawler import Crawler
+    from generator import TestGenerator
+    from executor import Executor
+    from state_graph import StateGraph
+    from ai_client import AIClient
+
+    log = _job_logger(job_id)
+    db_path = f"/tmp/qapal_job_{job_id}.json"
+    trace_dir = Path(settings.SCAN_TRACE_DIR) / job_id
+    locator_db = None
+    crawl_results: list = []
+    exec_results: list = []
+    url: str = "unknown"
+    stage = "init"
+    start_time = time.monotonic()
+
     try:
-        job = db.query(Job).filter(Job.id == job_id).first()
-        if job is None:
-            logger.error("Job %s not found", job_id)
-            return
+        # ── 1. Init (10%) ────────────────────────────────────────────
+        _update_job(job_id, log=log, state="running", progress=10, message="Starting scan...")
+        url, options = _get_job_info(job_id)
+        max_pages = options.get("max_pages", settings.SCAN_MAX_PAGES_DEFAULT)
 
-        if job.state != "queued":
-            logger.warning("Job %s is in state '%s', expected 'queued'", job_id, job.state)
-            return
+        locator_db = LocatorDB(path=db_path)
+        sg = StateGraph(locator_db)
+        ai_client = AIClient.from_env()
 
-        # ── Running ──────────────────────────────────────────────────
-        job.transition("running")
-        job.progress = 10
-        job.message = "Starting scan..."
-        db.commit()
-        logger.info("Job %s → running", job_id)
+        # ── 2. Crawl (15→30%) ────────────────────────────────────────
+        stage = "crawl"
+        _update_job(job_id, log=log, progress=15, message="Crawling site structure...")
+        log.info("Crawling %s (max_pages=%d)", url, max_pages)
 
-        start = time.monotonic()
+        async with Crawler(locator_db, headless=True, state_graph=sg) as crawler:
+            crawl_results = await asyncio.wait_for(
+                crawler.spider_crawl(
+                    start_urls=[url],
+                    max_depth=settings.SCAN_MAX_DEPTH,
+                    max_pages=max_pages,
+                    force=True,
+                ),
+                timeout=settings.SCAN_TIMEOUT_SECONDS * 0.4,
+            )
 
-        # Simulate progress checkpoints
-        checkpoints = [
-            (25, "Analyzing site structure..."),
-            (50, "Discovering interactive elements..."),
-            (75, "Validating actions..."),
-            (90, "Generating report..."),
-        ]
+        crawled_count = sum(1 for r in crawl_results if r.get("crawled"))
+        _update_job(job_id, log=log, progress=30, message=f"Crawled {crawled_count} pages")
+        log.info("Crawled %d pages", crawled_count)
 
-        for progress, message in checkpoints:
-            time.sleep(0.1)  # simulate work (fast for tests)
-            job.progress = progress
-            job.message = message
-            db.commit()
+        # ── 3. Auto-PRD (35%) ────────────────────────────────────────
+        stage = "plan"
+        _update_job(job_id, log=log, progress=35, message="Analyzing site structure...")
+        prd_content = _build_auto_prd(locator_db, url, crawl_results)
+        log.info("Auto-PRD generated (%d chars)", len(prd_content))
 
-        # ── Complete ─────────────────────────────────────────────────
-        duration_ms = int((time.monotonic() - start) * 1000)
-        report = _placeholder_report(job.url, duration_ms)
+        # ── 4. Plan (40→55%) — sync method, run in thread ────────────
+        _update_job(job_id, log=log, progress=40, message="Generating test plans...")
 
-        job.progress = 100
-        job.message = "Scan complete"
-        job.report = report
-        job.transition("complete")
-        db.commit()
-        logger.info("Job %s → complete (%.0fms)", job_id, duration_ms)
+        generator = TestGenerator(
+            locator_db,
+            ai_client,
+            state_graph=sg,
+            num_tests=settings.SCAN_NUM_TESTS,
+        )
+        plans = await asyncio.to_thread(
+            generator.generate_plans_from_prd, prd_content, [url]
+        )
+
+        valid_plans = [p for p in plans if not p.get("_planning_error")]
+        if not valid_plans:
+            raise RuntimeError("AI planner produced no valid test plans")
+
+        _update_job(
+            job_id, log=log, progress=55,
+            message=f"Generated {len(valid_plans)} test plans",
+        )
+        log.info("%d valid plans generated", len(valid_plans))
+
+        # ── 5. Execute (60→85%) ──────────────────────────────────────
+        stage = "execute"
+        _update_job(job_id, log=log, progress=60, message="Executing tests...")
+
+        async with Executor(
+            locator_db,
+            headless=True,
+            ai_client=ai_client,
+            state_graph=sg,
+            trace_dir=str(trace_dir),
+        ) as executor:
+            exec_results = await asyncio.wait_for(
+                executor.run_parallel(
+                    valid_plans,
+                    concurrency=settings.SCAN_EXEC_CONCURRENCY,
+                ),
+                timeout=settings.SCAN_TIMEOUT_SECONDS * 0.5,
+            )
+
+        _update_job(job_id, log=log, progress=85, message="Tests complete, building report...")
+        log.info("Executed %d tests", len(exec_results))
+
+        # ── 6. Report (90→100%) ──────────────────────────────────────
+        stage = "report"
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        report = _build_report(url, crawl_results, exec_results, duration_ms)
+
+        # Check for trace files from failed tests
+        trace_files = list(trace_dir.glob("*.zip")) if trace_dir.exists() else []
+        trace_path_str = str(trace_dir) if trace_files else None
+
+        _update_job(
+            job_id, log=log,
+            state="complete",
+            progress=100,
+            message="Scan complete",
+            report=report,
+            trace_path=trace_path_str,
+        )
+        log.info(
+            "Complete (score=%d, issues=%d, traces=%d, %.1fs)",
+            report["score"], len(report["issues"]), len(trace_files), duration_ms / 1000,
+        )
+
+    except asyncio.TimeoutError:
+        # Save partial results — partial data is more useful than "failed"
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        log.warning("Timed out during %s stage after %.1fs", stage, duration_ms / 1000)
+
+        report = _build_report(
+            url, crawl_results, exec_results, duration_ms,
+            timeout_stage=stage,
+        )
+        trace_files = list(trace_dir.glob("*.zip")) if trace_dir.exists() else []
+
+        _update_job(
+            job_id, log=log,
+            state="complete",
+            progress=100,
+            message=f"Scan complete (timed out during {stage})",
+            report=report,
+            failure_stage=stage,
+            trace_path=str(trace_dir) if trace_files else None,
+        )
 
     except Exception as e:
-        logger.exception("Job %s failed: %s", job_id, e)
-        try:
-            job = db.query(Job).filter(Job.id == job_id).first()
-            if job and job.state == "running":
-                job.transition("failed")
-                job.error = str(e)
-                job.message = "Scan failed"
-                db.commit()
-        except Exception:
-            logger.exception("Failed to mark job %s as failed", job_id)
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        log.exception("Failed during %s stage: %s", stage, e)
+
+        # Build partial report from whatever we collected
+        partial_report = None
+        if crawl_results or exec_results:
+            partial_report = _build_report(
+                url, crawl_results, exec_results, duration_ms,
+            )
+            partial_report["summary"] += f" (failed during {stage})"
+
+        trace_files = list(trace_dir.glob("*.zip")) if trace_dir.exists() else []
+
+        _update_job(
+            job_id, log=log,
+            state="failed",
+            error=str(e)[:500],
+            message=f"Scan failed during {stage}",
+            failure_stage=stage,
+            report=partial_report,
+            trace_path=str(trace_dir) if trace_files else None,
+        )
+
     finally:
-        db.close()
+        # Cleanup temp locator DB (traces are kept for diagnostics)
+        if locator_db:
+            try:
+                locator_db.close()
+            except Exception:
+                pass
+        try:
+            Path(db_path).unlink(missing_ok=True)
+        except Exception:
+            pass

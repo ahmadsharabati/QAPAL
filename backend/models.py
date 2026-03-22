@@ -93,6 +93,10 @@ class Job(Base):
     report = Column(JSON, nullable=True)
     error = Column(Text, nullable=True)
 
+    # Diagnostics
+    failure_stage = Column(String, nullable=True)   # "crawl" | "plan" | "execute" | None
+    trace_path = Column(String, nullable=True)      # path to Playwright trace dir
+
     # Timestamps
     created_at = Column(DateTime(timezone=True), default=_utcnow)
     started_at = Column(DateTime(timezone=True), nullable=True)

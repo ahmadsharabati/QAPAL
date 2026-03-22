@@ -1,5 +1,6 @@
 /**
  * JobList — shows past scan jobs with status.
+ * Merges Quick Scan (local) and Deep Scan (server) results.
  */
 
 import React from "react";
@@ -12,32 +13,45 @@ interface JobListProps {
 
 export function JobList({ jobs, onSelect }: JobListProps) {
   if (jobs.length === 0) {
-    return <p style={styles.empty}>No scans yet. Start your first scan above.</p>;
+    return <p style={styles.empty}>No scans yet. Run a Quick Scan to get started.</p>;
   }
 
   return (
     <div>
       <h3 style={styles.heading}>Recent Scans</h3>
-      {jobs.map((job) => (
-        <button
-          key={job.id}
-          onClick={() => onSelect(job.id)}
-          style={styles.row}
-          aria-label={`View scan for ${job.url}`}
-        >
-          <div style={styles.rowLeft}>
-            <span style={styles.hostname}>
-              {tryHostname(job.url)}
-            </span>
-            <span style={styles.date}>
-              {job.created_at ? formatDate(job.created_at) : ""}
-            </span>
-          </div>
-          <span style={{ ...styles.state, ...stateColor(job.state) }}>
-            {job.state}
-          </span>
-        </button>
-      ))}
+      {jobs.slice(0, 20).map((job) => {
+        const isQuick = job.id.startsWith("qs-");
+        return (
+          <button
+            key={job.id}
+            onClick={() => onSelect(job.id)}
+            style={styles.row}
+            aria-label={`View scan for ${job.url}`}
+          >
+            <div style={styles.rowLeft}>
+              <div style={styles.hostRow}>
+                <span style={styles.hostname}>
+                  {tryHostname(job.url)}
+                </span>
+                <span style={isQuick ? styles.quickLabel : styles.deepLabel}>
+                  {isQuick ? "Quick" : "Deep"}
+                </span>
+              </div>
+              <span style={styles.date}>
+                {job.created_at ? formatDate(job.created_at) : ""}
+              </span>
+            </div>
+            <div style={styles.rowRight}>
+              {job.report && (
+                <span style={styles.score}>{job.report.score}</span>
+              )}
+              <span style={{ ...styles.state, ...stateColor(job.state) }}>
+                {job.state}
+              </span>
+            </div>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -85,8 +99,39 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: "left",
     fontSize: 13,
   },
-  rowLeft: { display: "flex", flexDirection: "column", gap: 2 },
-  hostname: { fontWeight: 500, color: "#1a1a1a" },
+  rowLeft: { display: "flex", flexDirection: "column", gap: 2, flex: 1, minWidth: 0 },
+  rowRight: { display: "flex", alignItems: "center", gap: 8, flexShrink: 0 },
+  hostRow: { display: "flex", alignItems: "center", gap: 6 },
+  hostname: {
+    fontWeight: 500,
+    color: "#1a1a1a",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  quickLabel: {
+    fontSize: 10,
+    fontWeight: 600,
+    color: "#2563eb",
+    background: "#dbeafe",
+    padding: "1px 5px",
+    borderRadius: 3,
+    flexShrink: 0,
+  },
+  deepLabel: {
+    fontSize: 10,
+    fontWeight: 600,
+    color: "#7c3aed",
+    background: "#ede9fe",
+    padding: "1px 5px",
+    borderRadius: 3,
+    flexShrink: 0,
+  },
   date: { fontSize: 11, color: "#9ca3af" },
+  score: {
+    fontSize: 14,
+    fontWeight: 700,
+    color: "#374151",
+  },
   state: { fontSize: 12, fontWeight: 500 },
 };

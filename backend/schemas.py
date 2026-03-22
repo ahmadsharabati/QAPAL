@@ -70,6 +70,8 @@ class JobResponse(BaseModel):
     url: str
     report: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    failure_stage: Optional[str] = None
+    trace_path: Optional[str] = None
     created_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
@@ -87,8 +89,11 @@ class JobListResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     """GET /v1/health response."""
-    status: str
-    db: str
+    status: str           # "ok" | "degraded" | "unhealthy"
+    db: str               # "ok" | "error"
+    ai: str               # "ok" | "missing_key" | "missing_provider"
+    playwright: str       # "ok" | "not_installed"
+    disk: str             # "ok" | "low"
     version: str
 
 

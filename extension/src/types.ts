@@ -84,11 +84,16 @@ export interface HealthResponse {
 
 // ── Messages (popup ↔ service worker) ──────────────────────────────────
 
+export type ScanTier = "quick" | "deep";
+
 export type MessageType =
   | "START_SCAN"
   | "POLL_JOB"
   | "STOP_POLLING"
   | "JOB_UPDATE"
+  | "START_CLIENT_SCAN"
+  | "CLIENT_SCAN_COMPLETE"
+  | "CLIENT_SCAN_FAILED"
   | "GET_AUTH"
   | "SET_AUTH"
   | "CLEAR_AUTH";

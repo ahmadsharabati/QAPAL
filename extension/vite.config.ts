@@ -25,11 +25,15 @@ export default defineConfig({
       input: {
         popup: resolve(__dirname, "popup.html"),
         service_worker: resolve(__dirname, "src/background/service_worker.ts"),
+        scanner: resolve(__dirname, "src/content/scanner.ts"),
       },
       output: {
         entryFileNames: (chunkInfo) => {
           if (chunkInfo.name === "service_worker") {
             return "src/background/service_worker.js";
+          }
+          if (chunkInfo.name === "scanner") {
+            return "src/content/scanner.js";
           }
           return "assets/[name]-[hash].js";
         },

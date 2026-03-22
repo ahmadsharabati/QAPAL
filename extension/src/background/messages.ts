@@ -36,6 +36,10 @@ export function stopPolling(jobId: string): Promise<void> {
   }) as Promise<void>;
 }
 
+export function startClientScan(): Promise<Job> {
+  return sendMessage({ type: "START_CLIENT_SCAN" }) as Promise<Job>;
+}
+
 // ── Listen for updates from service worker ──────────────────────────────
 
 export function onJobUpdate(

@@ -38,8 +38,13 @@ class Settings(BaseSettings):
     STARTER_TIER_LIMIT: int = 50
     PRO_TIER_LIMIT: int = -1  # unlimited
 
-    # --- Scan ---
+    # --- Scan (Deep Scan engine) ---
     SCAN_TIMEOUT_SECONDS: int = 300
+    SCAN_MAX_DEPTH: int = 2
+    SCAN_MAX_PAGES_DEFAULT: int = 3
+    SCAN_NUM_TESTS: int = 3
+    SCAN_EXEC_CONCURRENCY: int = 2
+    SCAN_TRACE_DIR: str = "/tmp/qapal_traces"
 
     model_config = {
         "env_file": ".env",

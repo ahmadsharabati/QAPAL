@@ -19,10 +19,21 @@ from backend.routers import health, jobs, user
 
 # ── Logging ──────────────────────────────────────────────────────────────
 
-logging.basicConfig(
-    level=logging.DEBUG if settings.DEBUG else logging.INFO,
-    format="%(asctime)s %(name)s %(levelname)s %(message)s",
-)
+
+class _QAPALFormatter(logging.Formatter):
+    """Log formatter that auto-prefixes [job:<id>] when a job_id is present."""
+
+    def format(self, record):
+        job_id = getattr(record, "job_id", None)
+        if job_id:
+            record.msg = f"[job:{job_id[:8]}] {record.msg}"
+        return super().format(record)
+
+
+_handler = logging.StreamHandler()
+_handler.setFormatter(_QAPALFormatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+logging.root.addHandler(_handler)
+logging.root.setLevel(logging.DEBUG if settings.DEBUG else logging.INFO)
 
 
 # ── Lifespan ─────────────────────────────────────────────────────────────
@@ -49,17 +60,17 @@ def create_app() -> FastAPI:
         redoc_url=None,
     )
 
-    # CORS
+    # Request logging (added first → innermost middleware)
+    app.add_middleware(RequestLoggingMiddleware)
+
+    # CORS (added second → outermost, so it handles OPTIONS before anything else)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.CORS_ORIGINS,
-        allow_credentials=True,
+        allow_origins=["*"],  # allow all origins (extensions have dynamic IDs)
+        allow_credentials=False,  # must be False when allow_origins=["*"]
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-    # Request logging
-    app.add_middleware(RequestLoggingMiddleware)
 
     # Routers
     app.include_router(health.router)

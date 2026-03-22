@@ -41,6 +41,42 @@ def setup_db():
     Base.metadata.drop_all(bind=_engine)
 
 
+def _stub_deep_scan(job_id: str):
+    """Sync stub that replaces the async run_deep_scan for API tests."""
+    from backend.models import Job
+    from datetime import datetime, timezone
+
+    db = _TestSession()
+    try:
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if not job:
+            return
+        job.transition("running")
+        job.progress = 50
+        job.message = "Running (stub)..."
+        db.commit()
+
+        job.progress = 100
+        job.message = "Scan complete"
+        job.report = {
+            "summary": f"Stub scan for {job.url}",
+            "score": 85,
+            "issues": [],
+            "critical_count": 0,
+            "high_count": 0,
+            "medium_count": 0,
+            "pages_crawled": 1,
+            "actions_taken": 0,
+            "duration_ms": 100,
+            "engine_version": "test-stub",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        job.transition("complete")
+        db.commit()
+    finally:
+        db.close()
+
+
 @pytest.fixture()
 def client():
     """FastAPI TestClient with in-memory DB and stubbed worker."""
@@ -49,8 +85,8 @@ def client():
     app = create_app()
     app.dependency_overrides[get_db] = _override_get_db
 
-    # Patch the worker's SessionLocal to use our test DB
-    with patch("backend.worker.SessionLocal", _TestSession):
+    # Replace the async worker with a sync stub for API tests
+    with patch("backend.routers.jobs.run_deep_scan", _stub_deep_scan):
         yield TestClient(app, raise_server_exceptions=False)
 
 
@@ -68,7 +104,6 @@ class TestHealth:
         r = client.get("/v1/health")
         assert r.status_code == 200
         data = r.json()
-        assert data["status"] == "ok"
         assert data["db"] == "ok"
         assert data["version"] == settings.APP_VERSION
 
@@ -76,6 +111,23 @@ class TestHealth:
         """Health endpoint should work without auth."""
         r = client.get("/v1/health")
         assert r.status_code == 200
+
+    def test_health_includes_all_fields(self, client):
+        """Health response includes ai, playwright, disk fields."""
+        r = client.get("/v1/health")
+        data = r.json()
+        for field in ("status", "db", "ai", "playwright", "disk", "version"):
+            assert field in data, f"Missing field: {field}"
+
+    def test_health_degraded_without_ai(self, client):
+        """Missing AI provider env var → status=degraded, ai=missing_provider."""
+        with patch.dict("os.environ", {"QAPAL_AI_PROVIDER": ""}, clear=False):
+            r = client.get("/v1/health")
+            data = r.json()
+            assert data["ai"] == "missing_provider"
+            # If DB is fine but AI is missing, overall should be degraded
+            if data["db"] == "ok":
+                assert data["status"] == "degraded"
 
 
 # ============================================================================
@@ -222,7 +274,8 @@ class TestJobLifecycle:
         data = r.json()
         expected_keys = {
             "id", "state", "progress", "message", "url",
-            "report", "error", "created_at", "started_at", "completed_at",
+            "report", "error", "failure_stage", "trace_path",
+            "created_at", "started_at", "completed_at",
         }
         assert expected_keys.issubset(set(data.keys()))
 
@@ -325,7 +378,7 @@ class TestSSRFProtection:
 # Worker Stub
 # ============================================================================
 
-class TestWorkerStub:
+class TestWorkerIntegration:
     def test_worker_completes_job(self, client):
         """
         TestClient runs background tasks synchronously,
@@ -374,3 +427,334 @@ class TestStartup:
         r = client.get("/v1/health")
         assert r.status_code == 200
         assert r.json()["db"] == "ok"
+
+
+# ============================================================================
+# Worker Helpers — Pure Unit Tests (no Playwright, no AI, no network)
+# ============================================================================
+
+class TestWorkerHelpers:
+    """Test the pure functions in backend.worker."""
+
+    def test_extract_issues_step_failure(self):
+        from backend.worker import _extract_issues
+
+        exec_results = [
+            {
+                "id": "TC001",
+                "status": "fail",
+                "steps": [
+                    {"action": "navigate", "url": "https://x.com", "status": "pass"},
+                    {"action": "click", "status": "fail", "reason": "Element not found"},
+                ],
+                "assertions": [],
+                "passive_errors": {},
+            }
+        ]
+        issues = _extract_issues(exec_results)
+        assert len(issues) == 1
+        assert issues[0]["severity"] == "high"
+        assert issues[0]["rule"] == "INTERACTION_FAILURE"
+        assert "click failed" in issues[0]["message"]
+
+    def test_extract_issues_navigation_failure(self):
+        from backend.worker import _extract_issues
+
+        exec_results = [
+            {
+                "id": "TC002",
+                "status": "fail",
+                "steps": [
+                    {"action": "navigate", "url": "https://x.com", "status": "fail", "reason": "Timeout"},
+                ],
+                "assertions": [],
+                "passive_errors": {},
+            }
+        ]
+        issues = _extract_issues(exec_results)
+        assert len(issues) == 1
+        assert issues[0]["severity"] == "critical"
+        assert issues[0]["rule"] == "NAVIGATION_FAILURE"
+
+    def test_extract_issues_assertion_failure(self):
+        from backend.worker import _extract_issues
+
+        exec_results = [
+            {
+                "id": "TC003",
+                "status": "fail",
+                "steps": [{"action": "navigate", "url": "https://x.com", "status": "pass"}],
+                "assertions": [
+                    {"type": "url_equals", "status": "fail", "value": "https://x.com/dash", "actual": "https://x.com/login"},
+                ],
+                "passive_errors": {},
+            }
+        ]
+        issues = _extract_issues(exec_results)
+        assert len(issues) == 1
+        assert issues[0]["severity"] == "critical"
+        assert issues[0]["rule"] == "URL_ASSERTION_FAILED"
+
+    def test_extract_issues_passive_errors(self):
+        from backend.worker import _extract_issues
+
+        exec_results = [
+            {
+                "id": "TC004",
+                "status": "pass",
+                "steps": [],
+                "assertions": [],
+                "passive_errors": {
+                    "console_errors": [{"text": "Uncaught ref error", "url": "https://x.com"}],
+                    "js_exceptions": ["TypeError: x is not a function"],
+                    "network_failures": [{"url": "https://x.com/api/data", "failure": "net::ERR_FAILED"}],
+                },
+            }
+        ]
+        issues = _extract_issues(exec_results)
+        assert len(issues) == 3
+        severities = {i["rule"]: i["severity"] for i in issues}
+        assert severities["CONSOLE_ERROR"] == "medium"
+        assert severities["JS_EXCEPTION"] == "high"
+        assert severities["NETWORK_FAILURE"] == "medium"
+
+    def test_extract_issues_empty_results(self):
+        from backend.worker import _extract_issues
+
+        issues = _extract_issues([])
+        assert issues == []
+
+    def test_calculate_score_no_issues(self):
+        from backend.worker import _calculate_score
+        assert _calculate_score([]) == 100
+
+    def test_calculate_score_one_critical(self):
+        from backend.worker import _calculate_score
+        issues = [{"severity": "critical"}]
+        assert _calculate_score(issues) == 75  # 100 - 25
+
+    def test_calculate_score_mixed(self):
+        from backend.worker import _calculate_score
+        issues = [
+            {"severity": "critical"},
+            {"severity": "high"},
+            {"severity": "medium"},
+            {"severity": "low"},
+        ]
+        # 100 - 25 - 10 - 3 - 1 = 61
+        assert _calculate_score(issues) == 61
+
+    def test_calculate_score_floors_at_zero(self):
+        from backend.worker import _calculate_score
+        issues = [{"severity": "critical"}] * 5  # 5 * 25 = 125
+        assert _calculate_score(issues) == 0
+
+    def test_build_report_schema(self):
+        from backend.worker import _build_report
+
+        report = _build_report(
+            url="https://example.com",
+            crawl_results=[{"url": "https://example.com", "crawled": True}],
+            exec_results=[
+                {
+                    "id": "TC001",
+                    "status": "pass",
+                    "steps": [{"action": "navigate", "url": "https://example.com", "status": "pass"}],
+                    "assertions": [],
+                    "passive_errors": {},
+                }
+            ],
+            duration_ms=1500,
+        )
+
+        # Verify all required Report keys exist
+        required_keys = [
+            "summary", "score", "issues", "critical_count", "high_count",
+            "medium_count", "pages_crawled", "actions_taken", "duration_ms",
+            "engine_version", "generated_at",
+        ]
+        for key in required_keys:
+            assert key in report, f"Missing key: {key}"
+
+        assert report["engine_version"] == "deep-1.0"
+        assert report["pages_crawled"] == 1
+        assert report["duration_ms"] == 1500
+        assert isinstance(report["issues"], list)
+        assert report["score"] == 100  # no failures
+
+    def test_build_report_with_failures(self):
+        from backend.worker import _build_report
+
+        report = _build_report(
+            url="https://example.com",
+            crawl_results=[{"url": "https://example.com", "crawled": True}],
+            exec_results=[
+                {
+                    "id": "TC001",
+                    "status": "fail",
+                    "steps": [
+                        {"action": "navigate", "url": "https://example.com", "status": "fail", "reason": "Timeout"},
+                    ],
+                    "assertions": [],
+                    "passive_errors": {},
+                }
+            ],
+            duration_ms=5000,
+        )
+
+        assert len(report["issues"]) == 1
+        assert report["critical_count"] == 1
+        assert report["score"] < 100
+
+    def test_build_report_timed_out(self):
+        from backend.worker import _build_report
+
+        report = _build_report(
+            url="https://example.com",
+            crawl_results=[],
+            exec_results=[],
+            duration_ms=300000,
+            timeout_stage="crawl",
+        )
+
+        assert "timed out" in report["summary"].lower()
+        assert "crawl" in report["summary"].lower()
+        assert report["score"] == 100  # no issues found (timed out before execution)
+
+    def test_update_job(self):
+        """_update_job writes fields to the DB correctly."""
+        from backend.worker import _update_job
+        from backend.models import Job
+
+        # Create a job directly
+        db = _TestSession()
+        job = Job(user_id="u1", url="https://example.com", state="queued", progress=0)
+        db.add(job)
+        db.commit()
+        job_id = job.id
+        db.close()
+
+        # Patch SessionLocal so _update_job uses our test DB
+        with patch("backend.worker.SessionLocal", _TestSession):
+            _update_job(job_id, progress=50, message="Halfway")
+
+        # Verify
+        db = _TestSession()
+        job = db.query(Job).filter(Job.id == job_id).first()
+        assert job.progress == 50
+        assert job.message == "Halfway"
+        db.close()
+
+    def test_build_auto_prd(self):
+        """Auto-PRD contains expected sections from mock locators."""
+        from unittest.mock import MagicMock
+        from backend.worker import _build_auto_prd
+
+        mock_db = MagicMock()
+        mock_db.get_all_locators.return_value = [
+            {"role": "link", "name": "Home", "container": "nav"},
+            {"role": "link", "name": "About", "container": "nav"},
+            {"role": "textbox", "name": "Email"},
+            {"role": "button", "name": "Submit"},
+        ]
+        mock_db.get_all.return_value = [{"id": 1}, {"id": 2}]
+
+        crawl_results = [
+            {"url": "https://example.com", "crawled": True},
+            {"url": "https://example.com/about", "crawled": True},
+        ]
+
+        prd = _build_auto_prd(mock_db, "https://example.com", crawl_results)
+
+        assert "Smoke Test" in prd
+        assert "example.com" in prd
+        assert "TC1" in prd
+        assert "Navigation" in prd or "navigation" in prd
+        assert "Form" in prd or "form" in prd
+        assert "Home" in prd
+        assert "Email" in prd
+
+    def test_job_logger_includes_job_id(self):
+        """LoggerAdapter auto-tags records with job_id."""
+        from backend.worker import _job_logger
+        import logging
+
+        log = _job_logger("test-abc-123")
+        with patch.object(log.logger, "handle") as mock_handle:
+            log.info("Test message")
+            assert mock_handle.called
+            record = mock_handle.call_args[0][0]
+            assert record.job_id == "test-abc-123"
+
+    def test_build_report_with_timeout_stage(self):
+        """Report summary includes the stage that timed out."""
+        from backend.worker import _build_report
+
+        report = _build_report(
+            url="https://example.com",
+            crawl_results=[{"url": "https://example.com", "crawled": True}],
+            exec_results=[],
+            duration_ms=120000,
+            timeout_stage="execute",
+        )
+        assert "execute" in report["summary"]
+        assert "timed out" in report["summary"].lower()
+
+    def test_build_report_partial_on_error(self):
+        """Report built from crawl-only data (no exec results) is valid."""
+        from backend.worker import _build_report
+
+        report = _build_report(
+            url="https://example.com",
+            crawl_results=[
+                {"url": "https://example.com", "crawled": True},
+                {"url": "https://example.com/about", "crawled": True},
+            ],
+            exec_results=[],
+            duration_ms=5000,
+        )
+        assert report["pages_crawled"] == 2
+        assert report["score"] == 100  # no exec = no issues
+        assert report["issues"] == []
+        assert "engine_version" in report
+
+    def test_failure_stage_persisted(self):
+        """_update_job(failure_stage='crawl') saves to DB."""
+        from backend.worker import _update_job
+        from backend.models import Job
+
+        db = _TestSession()
+        job = Job(user_id="u1", url="https://example.com", state="queued", progress=0)
+        db.add(job)
+        db.commit()
+        job_id = job.id
+        db.close()
+
+        with patch("backend.worker.SessionLocal", _TestSession):
+            _update_job(job_id, failure_stage="crawl", message="Timed out")
+
+        db = _TestSession()
+        job = db.query(Job).filter(Job.id == job_id).first()
+        assert job.failure_stage == "crawl"
+        assert job.message == "Timed out"
+        db.close()
+
+    def test_trace_path_persisted(self):
+        """_update_job(trace_path=...) saves to DB."""
+        from backend.worker import _update_job
+        from backend.models import Job
+
+        db = _TestSession()
+        job = Job(user_id="u1", url="https://example.com", state="queued", progress=0)
+        db.add(job)
+        db.commit()
+        job_id = job.id
+        db.close()
+
+        with patch("backend.worker.SessionLocal", _TestSession):
+            _update_job(job_id, trace_path="/tmp/qapal_traces/test-123")
+
+        db = _TestSession()
+        job = db.query(Job).filter(Job.id == job_id).first()
+        assert job.trace_path == "/tmp/qapal_traces/test-123"
+        db.close()

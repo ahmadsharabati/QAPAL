@@ -1,6 +1,11 @@
 """
-Health endpoint — quick liveness check for the API.
+Health endpoint — readiness check for the API and its dependencies.
+
+Checks: database, AI provider config, Playwright installation, disk space.
 """
+
+import os
+import shutil
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
@@ -13,11 +18,53 @@ from backend.schemas import HealthResponse
 router = APIRouter(tags=["health"])
 
 
+# ── Dependency checks ─────────────────────────────────────────────────────
+
+
+def _check_ai() -> str:
+    """Verify AI provider env var and corresponding API key exist (no API call)."""
+    provider = os.getenv("QAPAL_AI_PROVIDER", "").strip()
+    if not provider:
+        return "missing_provider"
+    key_map = {
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "grok": "XAI_API_KEY",
+    }
+    key_var = key_map.get(provider)
+    if key_var and not os.getenv(key_var, "").strip():
+        return "missing_key"
+    return "ok"
+
+
+def _check_playwright() -> str:
+    """Check that Playwright is importable (lightweight, no browser launch)."""
+    try:
+        from playwright.async_api import async_playwright  # noqa: F401
+        return "ok"
+    except ImportError:
+        return "not_installed"
+
+
+def _check_disk() -> str:
+    """Check available disk space in /tmp (where traces and temp DBs live)."""
+    try:
+        usage = shutil.disk_usage("/tmp")
+        if usage.free < 500 * 1024 * 1024:  # < 500 MB
+            return "low"
+        return "ok"
+    except Exception:
+        return "ok"  # fail open
+
+
+# ── Endpoint ──────────────────────────────────────────────────────────────
+
+
 @router.get("/v1/health", response_model=HealthResponse)
 def health_check(db: Session = Depends(get_db)):
     """
-    Returns service status.  Verifies DB is reachable.
-    Returns 503 if the database is down.
+    Returns service status.  Checks DB, AI config, Playwright, and disk.
+    Returns "unhealthy" if the database is down, "degraded" for other issues.
     """
     db_status = "ok"
     try:
@@ -25,10 +72,23 @@ def health_check(db: Session = Depends(get_db)):
     except Exception:
         db_status = "error"
 
-    overall = "ok" if db_status == "ok" else "degraded"
+    ai_status = _check_ai()
+    pw_status = _check_playwright()
+    disk_status = _check_disk()
+
+    statuses = [db_status, ai_status, pw_status, disk_status]
+    if all(s == "ok" for s in statuses):
+        overall = "ok"
+    elif db_status == "error":
+        overall = "unhealthy"
+    else:
+        overall = "degraded"
 
     return HealthResponse(
         status=overall,
         db=db_status,
+        ai=ai_status,
+        playwright=pw_status,
+        disk=disk_status,
         version=settings.APP_VERSION,
     )

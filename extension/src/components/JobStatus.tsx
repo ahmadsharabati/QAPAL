@@ -1,5 +1,6 @@
 /**
  * JobStatus — shows current job progress and result.
+ * Works identically for both Quick Scan and Deep Scan results.
  */
 
 import React from "react";
@@ -10,15 +11,24 @@ interface JobStatusProps {
 }
 
 export function JobStatus({ job }: JobStatusProps) {
+  const isQuick = job.report?.engine_version?.startsWith("client-");
+
   return (
     <div style={styles.container}>
       <div style={styles.header}>
         <span style={styles.url} title={job.url}>
-          {new URL(job.url).hostname}
+          {tryHostname(job.url)}
         </span>
-        <span style={{ ...styles.badge, ...badgeColor(job.state) }}>
-          {job.state}
-        </span>
+        <div style={styles.badges}>
+          {isQuick !== undefined && (
+            <span style={isQuick ? styles.quickBadge : styles.deepBadge}>
+              {isQuick ? "Quick" : "Deep"}
+            </span>
+          )}
+          <span style={{ ...styles.badge, ...badgeColor(job.state) }}>
+            {job.state}
+          </span>
+        </div>
       </div>
 
       {/* Progress bar */}
@@ -49,7 +59,12 @@ export function JobStatus({ job }: JobStatusProps) {
         <div style={styles.report}>
           <div style={styles.scoreRow}>
             <span style={styles.scoreLabel}>Score</span>
-            <span style={styles.scoreValue}>{job.report.score}/100</span>
+            <span style={{
+              ...styles.scoreValue,
+              color: job.report.score >= 80 ? "#166534" : job.report.score >= 50 ? "#854d0e" : "#991b1b",
+            }}>
+              {job.report.score}/100
+            </span>
           </div>
           <p style={styles.summary}>{job.report.summary}</p>
           <div style={styles.counts}>
@@ -71,23 +86,45 @@ export function JobStatus({ job }: JobStatusProps) {
           </div>
           {job.report.issues.length > 0 && (
             <div style={styles.issues}>
-              {job.report.issues.slice(0, 5).map((issue) => (
+              {job.report.issues.slice(0, 8).map((issue) => (
                 <div key={issue.id} style={styles.issue}>
-                  <span style={styles.issueSeverity}>{issue.severity}</span>
-                  <span style={styles.issueMessage}>{issue.message}</span>
+                  <span style={{
+                    ...styles.issueSeverity,
+                    color: severityColor(issue.severity),
+                  }}>
+                    {issue.severity}
+                  </span>
+                  <div style={styles.issueContent}>
+                    <span style={styles.issueRule}>{issue.rule}</span>
+                    <span style={styles.issueMessage}>{issue.message}</span>
+                  </div>
                 </div>
               ))}
-              {job.report.issues.length > 5 && (
+              {job.report.issues.length > 8 && (
                 <p style={styles.moreIssues}>
-                  +{job.report.issues.length - 5} more issues
+                  +{job.report.issues.length - 8} more issues
                 </p>
               )}
             </div>
           )}
+          {job.report.issues.length === 0 && (
+            <p style={styles.noIssues}>No issues found! This page looks great.</p>
+          )}
+          <p style={styles.meta}>
+            Scanned in {job.report.duration_ms}ms &middot; {job.report.engine_version}
+          </p>
         </div>
       )}
     </div>
   );
+}
+
+function tryHostname(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
 }
 
 function badgeColor(state: string): React.CSSProperties {
@@ -97,6 +134,16 @@ function badgeColor(state: string): React.CSSProperties {
     case "running":  return { background: "#dbeafe", color: "#1e40af" };
     case "queued":   return { background: "#f3f4f6", color: "#374151" };
     default:         return { background: "#f3f4f6", color: "#374151" };
+  }
+}
+
+function severityColor(severity: string): string {
+  switch (severity) {
+    case "critical": return "#991b1b";
+    case "high":     return "#9a3412";
+    case "medium":   return "#854d0e";
+    case "low":      return "#6b7280";
+    default:         return "#6b7280";
   }
 }
 
@@ -120,13 +167,30 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
-    maxWidth: 220,
+    maxWidth: 180,
   },
+  badges: { display: "flex", gap: 6, alignItems: "center" },
   badge: {
     padding: "2px 8px",
     borderRadius: 12,
     fontSize: 12,
     fontWeight: 500,
+  },
+  quickBadge: {
+    padding: "2px 6px",
+    borderRadius: 3,
+    fontSize: 10,
+    fontWeight: 600,
+    color: "#2563eb",
+    background: "#dbeafe",
+  },
+  deepBadge: {
+    padding: "2px 6px",
+    borderRadius: 3,
+    fontSize: 10,
+    fontWeight: 600,
+    color: "#7c3aed",
+    background: "#ede9fe",
   },
   progressTrack: {
     height: 4,
@@ -150,7 +214,7 @@ const styles: Record<string, React.CSSProperties> = {
     marginBottom: 8,
   },
   scoreLabel: { fontSize: 13, color: "#6b7280" },
-  scoreValue: { fontSize: 18, fontWeight: 700, color: "#1a1a1a" },
+  scoreValue: { fontSize: 18, fontWeight: 700 },
   summary: { fontSize: 13, color: "#374151", marginBottom: 8 },
   counts: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 },
   countBadge: {
@@ -164,15 +228,38 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     gap: 8,
     alignItems: "baseline",
-    marginBottom: 4,
+    marginBottom: 6,
   },
   issueSeverity: {
-    fontSize: 11,
-    fontWeight: 600,
+    fontSize: 10,
+    fontWeight: 700,
     textTransform: "uppercase",
-    color: "#6b7280",
     minWidth: 50,
+    flexShrink: 0,
   },
-  issueMessage: { fontSize: 13, color: "#374151" },
+  issueContent: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 1,
+    minWidth: 0,
+  },
+  issueRule: {
+    fontSize: 11,
+    color: "#6b7280",
+    fontFamily: "monospace",
+  },
+  issueMessage: {
+    fontSize: 12,
+    color: "#374151",
+    lineHeight: "1.3",
+  },
   moreIssues: { fontSize: 12, color: "#6b7280", marginTop: 4 },
+  noIssues: { fontSize: 13, color: "#166534", textAlign: "center", padding: 12 },
+  meta: {
+    fontSize: 11,
+    color: "#9ca3af",
+    marginTop: 8,
+    borderTop: "1px solid #f3f4f6",
+    paddingTop: 6,
+  },
 };

@@ -999,6 +999,7 @@ class Executor:
         state_graph:  Optional[StateGraph] = None,
         device:       Optional[str]   = None,
         viewport:     Optional[tuple] = None,
+        trace_dir:    Optional[str]   = None,
     ):
         self._db          = db
         self._headless    = headless if headless is not None else (
@@ -1009,6 +1010,7 @@ class Executor:
         self._state_graph = state_graph
         self._device_name = device or os.getenv("QAPAL_DEVICE", None)
         self._viewport    = viewport  # (width, height) tuple or None
+        self._trace_dir   = trace_dir  # if set, save Playwright traces for failed tests
         self._device_kwargs: dict = {}
         self._pw          = None
         self._browser     = None
@@ -1179,6 +1181,11 @@ class Executor:
             self._credentials,
             self._device_kwargs,
         )
+
+        # Start Playwright tracing (saved only on failure)
+        if self._trace_dir:
+            await ctx.tracing.start(screenshots=True, snapshots=True, sources=False)
+
         page = await ctx.new_page()
 
         # ── Passive error interception ─────────────────────────────────
@@ -1298,6 +1305,17 @@ class Executor:
                 final_screenshot = await _screenshot(page, f"{tc_id}_fail")
 
         finally:
+            # Stop tracing — save to file only for failed tests
+            if self._trace_dir:
+                try:
+                    if not passed:
+                        trace_path = Path(self._trace_dir) / f"{tc_id}.zip"
+                        trace_path.parent.mkdir(parents=True, exist_ok=True)
+                        await ctx.tracing.stop(path=str(trace_path))
+                    else:
+                        await ctx.tracing.stop()  # discard — no path
+                except Exception:
+                    pass  # tracing failure should not break test results
             await ctx.close()
 
         passive_errors = {
