@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "QAPAL — Site Testing",
+  "version": "1.0.0",
+  "description": "Test any website for functional, UX, and accessibility issues.",
+  "permissions": [
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [],
+  "background": {
+    "service_worker": "src/background/service_worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "QAPAL Site Testing"
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; style-src 'self' 'unsafe-inline';"
+  }
+}
