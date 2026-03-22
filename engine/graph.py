@@ -16,7 +16,7 @@ Core principles:
 
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Any, Set, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 import hashlib
 import json
@@ -92,7 +92,7 @@ class StateSnapshot:
     screenshot_key: Optional[str] = None  # R2 or local path
     
     # Metadata
-    captured_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    captured_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     page_load_time_ms: Optional[int] = None
 
 
@@ -188,7 +188,7 @@ class GraphNode:
     state_type: str = "page"        # 'page', 'modal', 'error', 'loading', 'form'
     
     # Metadata
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     visit_count: int = 0            # How many times we've seen this state
     is_entry_point: bool = False    # Starting page
     is_dead_end: bool = False       # No outgoing edges
@@ -234,7 +234,7 @@ class GraphEdge:
     failures: List[str] = field(default_factory=list)
     
     # Metadata
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     last_executed_at: Optional[str] = None
     confidence: float = 0.5         # How confident we are this edge is correct
 
@@ -263,8 +263,8 @@ class SiteStateGraph:
     entry_node_id: Optional[str] = None
     
     # Metadata
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
-    last_updated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    last_updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     
     def add_node(self, node: GraphNode) -> str:
         """Add a node to the graph, handling deduplication."""

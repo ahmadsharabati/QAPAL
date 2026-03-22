@@ -9,7 +9,7 @@ One call returns a complete repair result.
 
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 from engine.graph import SiteStateGraph, GraphNode
 from engine.repair.failure_parser import FailureParser, ParsedFailure
@@ -44,7 +44,7 @@ class RepairResult:
     repair_strategy: str = ""
     confidence: float = 0.0
     duration_ms: int = 0
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     
     # Trace (for debugging)
     trace: List[Dict[str, Any]] = field(default_factory=list)
