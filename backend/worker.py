@@ -417,10 +417,27 @@ async def run_deep_scan(job_id: str) -> None:
         _update_job(job_id, log=log, progress=85, message="Tests complete, building report...")
         log.info("Executed %d tests", len(exec_results))
 
-        # ── 6. Report (90→100%) ──────────────────────────────────────
+        # ── 6. Report (90→95%) ────────────────────────────────────────
         stage = "report"
         duration_ms = int((time.monotonic() - start_time) * 1000)
         report = _build_report(url, crawl_results, exec_results, duration_ms)
+
+        # ── 7. Narration (95→100%) ────────────────────────────────────
+        _update_job(job_id, log=log, progress=95, message="Generating summary...")
+        try:
+            from backend.services.narration import generate_narration
+            narration = await generate_narration(
+                url=url,
+                score=report["score"],
+                issues=report["issues"],
+                pages_crawled=report["pages_crawled"],
+                actions_taken=report["actions_taken"],
+            )
+            report["narration"] = narration
+            log.info("Narration: %s", narration[:80])
+        except Exception as narr_err:
+            log.warning("Narration failed: %s", narr_err)
+            report["narration"] = None
 
         # Check for trace files from failed tests
         trace_files = list(trace_dir.glob("*.zip")) if trace_dir.exists() else []
@@ -448,6 +465,17 @@ async def run_deep_scan(job_id: str) -> None:
             url, crawl_results, exec_results, duration_ms,
             timeout_stage=stage,
         )
+
+        # Template narration for timeouts (skip AI to save time)
+        try:
+            from backend.services.narration import _template_narration
+            report["narration"] = _template_narration(
+                url, report["score"], report["issues"],
+                report["pages_crawled"], timed_out=True,
+            )
+        except Exception:
+            report["narration"] = None
+
         trace_files = list(trace_dir.glob("*.zip")) if trace_dir.exists() else []
 
         _update_job(

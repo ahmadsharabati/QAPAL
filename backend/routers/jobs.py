@@ -2,6 +2,7 @@
 Job router — create, poll, list, and delete scan jobs.
 
 Every endpoint enforces ownership: a user can only access their own jobs.
+Quota, rate limits, and concurrent scan limits are checked before creation.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
@@ -9,15 +10,22 @@ from sqlalchemy.orm import Session
 
 from backend.database import get_db
 from backend.models import Job, User
-from backend.schemas import JobCreate, JobResponse, JobListResponse
+from backend.schemas import JobCreate, JobResponse, JobListResponse, ErrorResponse
 from backend.services.auth import get_current_user
-from backend.services.quota import check_quota, increment_usage
+from backend.services.quota import check_quota, increment_usage, get_remaining, _tier_limit
+from backend.services.rate_limit import (
+    check_scan_rate_limit,
+    can_start_scan,
+    register_active_scan,
+    deregister_active_scan,
+)
 from backend.worker import run_deep_scan
 
 router = APIRouter(prefix="/v1/jobs", tags=["jobs"])
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────
+
 
 def _get_owned_job(db: Session, job_id: str, user: User) -> Job:
     """Fetch a job, verify ownership, raise 404 if missing or not owned."""
@@ -29,9 +37,18 @@ def _get_owned_job(db: Session, job_id: str, user: User) -> Job:
     return job
 
 
-# ── Endpoints ────────────────────────────────────────────────────────────
+# ── Endpoints ────────────────────────────────────────────────────────
 
-@router.post("", response_model=JobResponse, status_code=201)
+
+@router.post(
+    "",
+    response_model=JobResponse,
+    status_code=201,
+    responses={
+        403: {"model": ErrorResponse, "description": "Quota exceeded"},
+        429: {"model": ErrorResponse, "description": "Rate limit or concurrency limit"},
+    },
+)
 def create_job(
     body: JobCreate,
     background_tasks: BackgroundTasks,
@@ -41,12 +58,44 @@ def create_job(
     """
     Create a new scan job.
 
-    Validates auth, checks quota, persists the job as 'queued',
-    and launches a background task to process it.
+    Validates auth, checks quota, rate limits, and concurrent scan limits,
+    persists the job as 'queued', and launches a background task.
     """
+    # Scan rate limit (5 creates per minute per user)
+    allowed, _headers = check_scan_rate_limit(user.id)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many scan requests. Please wait a moment before starting another scan.",
+            headers=_headers,
+        )
+
+    # Concurrent scan limit
+    if not can_start_scan(user.id, user.tier):
+        tier_names = {"free": "Free", "starter": "Starter", "pro": "Pro"}
+        limits = {"free": 1, "starter": 2, "pro": 5}
+        current_limit = limits.get(user.tier, 1)
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"You already have {current_limit} scan(s) running. "
+                f"{tier_names.get(user.tier, 'Free')} tier allows {current_limit} "
+                f"concurrent scan(s). Upgrade to increase your limit."
+            ),
+        )
+
     # Quota check
     if not check_quota(db, user):
-        raise HTTPException(status_code=403, detail="Monthly scan quota exceeded")
+        remaining = get_remaining(db, user)
+        limit = _tier_limit(user.tier)
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Monthly scan quota exceeded ({limit} scans/month on "
+                f"{user.tier.title()} tier). Resets on the 1st of next month. "
+                f"Upgrade to Starter (50/month) or Pro (unlimited) for more scans."
+            ),
+        )
 
     # Tier-based max_pages cap
     tier_caps = {"free": 3, "starter": 10, "pro": 25}
@@ -69,10 +118,21 @@ def create_job(
     db.commit()
     db.refresh(job)
 
-    # Launch background task
-    background_tasks.add_task(run_deep_scan, job.id)
+    # Track concurrent scan
+    register_active_scan(user.id, job.id)
+
+    # Launch background task (deregisters on completion)
+    background_tasks.add_task(_run_and_deregister, job.id, user.id)
 
     return job
+
+
+async def _run_and_deregister(job_id: str, user_id: str):
+    """Run deep scan and deregister from active scans when done."""
+    try:
+        await run_deep_scan(job_id)
+    finally:
+        deregister_active_scan(user_id, job_id)
 
 
 @router.get("/{job_id}", response_model=JobResponse)

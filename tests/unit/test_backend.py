@@ -1,11 +1,12 @@
 """
 Backend API tests — uses FastAPI TestClient (no server needed).
 
-Tests cover: health, auth, quota, job lifecycle, SSRF, ownership, state machine.
+Tests cover: health, auth, quota, job lifecycle, SSRF, ownership, state machine,
+rate limiting, concurrent scan limits, narration, security headers.
 """
 
 import pytest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock, AsyncMock
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -41,40 +42,56 @@ def setup_db():
     Base.metadata.drop_all(bind=_engine)
 
 
-def _stub_deep_scan(job_id: str):
-    """Sync stub that replaces the async run_deep_scan for API tests."""
+def _stub_deep_scan(job_id: str, user_id: str = ""):
+    """Sync stub that replaces the async _run_and_deregister for API tests."""
     from backend.models import Job
+    from backend.services.rate_limit import deregister_active_scan
     from datetime import datetime, timezone
 
-    db = _TestSession()
     try:
-        job = db.query(Job).filter(Job.id == job_id).first()
-        if not job:
-            return
-        job.transition("running")
-        job.progress = 50
-        job.message = "Running (stub)..."
-        db.commit()
+        db = _TestSession()
+        try:
+            job = db.query(Job).filter(Job.id == job_id).first()
+            if not job:
+                return
+            job.transition("running")
+            job.progress = 50
+            job.message = "Running (stub)..."
+            db.commit()
 
-        job.progress = 100
-        job.message = "Scan complete"
-        job.report = {
-            "summary": f"Stub scan for {job.url}",
-            "score": 85,
-            "issues": [],
-            "critical_count": 0,
-            "high_count": 0,
-            "medium_count": 0,
-            "pages_crawled": 1,
-            "actions_taken": 0,
-            "duration_ms": 100,
-            "engine_version": "test-stub",
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-        }
-        job.transition("complete")
-        db.commit()
+            job.progress = 100
+            job.message = "Scan complete"
+            job.report = {
+                "summary": f"Stub scan for {job.url}",
+                "score": 85,
+                "issues": [],
+                "critical_count": 0,
+                "high_count": 0,
+                "medium_count": 0,
+                "pages_crawled": 1,
+                "actions_taken": 0,
+                "duration_ms": 100,
+                "engine_version": "test-stub",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "narration": "Test site passed all checks with no issues.",
+            }
+            job.transition("complete")
+            db.commit()
+        finally:
+            db.close()
     finally:
-        db.close()
+        # Deregister from active scans (mirrors _run_and_deregister)
+        deregister_active_scan(user_id, job_id)
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limits():
+    """Reset rate limit state between tests."""
+    from backend.services.rate_limit import _global_limiter, _scan_limiter, _active_scans
+    _global_limiter._requests.clear()
+    _scan_limiter._requests.clear()
+    _active_scans.clear()
+    yield
 
 
 @pytest.fixture()
@@ -86,7 +103,7 @@ def client():
     app.dependency_overrides[get_db] = _override_get_db
 
     # Replace the async worker with a sync stub for API tests
-    with patch("backend.routers.jobs.run_deep_scan", _stub_deep_scan):
+    with patch("backend.routers.jobs._run_and_deregister", _stub_deep_scan):
         yield TestClient(app, raise_server_exceptions=False)
 
 
@@ -190,6 +207,23 @@ class TestQuota:
         )
         assert r.status_code == 403
         assert "quota" in r.json()["detail"].lower()
+
+    def test_quota_exceeded_includes_upgrade_hint(self, client):
+        """Quota error message suggests upgrading."""
+        for i in range(settings.FREE_TIER_LIMIT):
+            client.post(
+                "/v1/jobs",
+                json={"url": f"https://example.com/{i}"},
+                headers=AUTH,
+            )
+        r = client.post(
+            "/v1/jobs",
+            json={"url": "https://example.com/over"},
+            headers=AUTH,
+        )
+        assert r.status_code == 403
+        detail = r.json()["detail"]
+        assert "upgrade" in detail.lower() or "Upgrade" in detail
 
 
 # ============================================================================
@@ -375,6 +409,96 @@ class TestSSRFProtection:
 
 
 # ============================================================================
+# Rate Limiting
+# ============================================================================
+
+class TestRateLimiting:
+    def test_rate_limit_headers_present(self, client):
+        """All responses include rate limit headers."""
+        r = client.get("/v1/user/profile", headers=AUTH)
+        assert "X-RateLimit-Limit" in r.headers
+        assert "X-RateLimit-Remaining" in r.headers
+
+    def test_health_exempt_from_rate_limit(self, client):
+        """Health endpoint is exempt from rate limiting."""
+        for _ in range(100):
+            r = client.get("/v1/health")
+            assert r.status_code == 200
+
+    def test_scan_rate_limit_unit(self):
+        """Scan rate limiter blocks rapid-fire creates."""
+        from backend.services.rate_limit import check_scan_rate_limit
+
+        # First 10 should pass
+        for _ in range(10):
+            allowed, _ = check_scan_rate_limit("test-user")
+            assert allowed is True
+
+        # 11th should be blocked
+        allowed, headers = check_scan_rate_limit("test-user")
+        assert allowed is False
+        assert "Retry-After" in headers
+
+
+# ============================================================================
+# Concurrent Scan Limits
+# ============================================================================
+
+class TestConcurrentScans:
+    def test_concurrent_limit_free_tier(self):
+        """Free tier users can only run 1 concurrent scan."""
+        from backend.services.rate_limit import (
+            can_start_scan, register_active_scan, deregister_active_scan,
+        )
+
+        assert can_start_scan("u1", "free") is True
+        register_active_scan("u1", "job-1")
+        assert can_start_scan("u1", "free") is False
+
+        deregister_active_scan("u1", "job-1")
+        assert can_start_scan("u1", "free") is True
+
+    def test_concurrent_limit_pro_tier(self):
+        """Pro tier allows up to 5 concurrent scans."""
+        from backend.services.rate_limit import can_start_scan, register_active_scan
+
+        for i in range(5):
+            assert can_start_scan("u1", "pro") is True
+            register_active_scan("u1", f"job-{i}")
+
+        assert can_start_scan("u1", "pro") is False
+
+    def test_concurrent_limit_isolated_per_user(self):
+        """One user's scans don't affect another user's limits."""
+        from backend.services.rate_limit import can_start_scan, register_active_scan
+
+        register_active_scan("u1", "job-1")
+        assert can_start_scan("u2", "free") is True
+
+
+# ============================================================================
+# Security Headers
+# ============================================================================
+
+class TestSecurityHeaders:
+    def test_x_frame_options(self, client):
+        r = client.get("/v1/health")
+        assert r.headers.get("X-Frame-Options") == "DENY"
+
+    def test_x_content_type_options(self, client):
+        r = client.get("/v1/health")
+        assert r.headers.get("X-Content-Type-Options") == "nosniff"
+
+    def test_referrer_policy(self, client):
+        r = client.get("/v1/health")
+        assert r.headers.get("Referrer-Policy") == "strict-origin-when-cross-origin"
+
+    def test_permissions_policy(self, client):
+        r = client.get("/v1/health")
+        assert "camera=()" in r.headers.get("Permissions-Policy", "")
+
+
+# ============================================================================
 # Worker Stub
 # ============================================================================
 
@@ -415,6 +539,19 @@ class TestWorkerIntegration:
         assert "issues" in report
         assert isinstance(report["issues"], list)
         assert "duration_ms" in report
+
+    def test_report_includes_narration(self, client):
+        """Completed job report includes narration field."""
+        r = client.post(
+            "/v1/jobs",
+            json={"url": "https://example.com"},
+            headers=AUTH,
+        )
+        job_id = r.json()["id"]
+
+        r = client.get(f"/v1/jobs/{job_id}", headers=AUTH)
+        report = r.json()["report"]
+        assert "narration" in report
 
 
 # ============================================================================
@@ -758,3 +895,114 @@ class TestWorkerHelpers:
         job = db.query(Job).filter(Job.id == job_id).first()
         assert job.trace_path == "/tmp/qapal_traces/test-123"
         db.close()
+
+
+# ============================================================================
+# Narration Service — Unit Tests
+# ============================================================================
+
+class TestNarration:
+    def test_template_narration_high_score(self):
+        """High score → positive narration."""
+        from backend.services.narration import _template_narration
+
+        text = _template_narration(
+            url="https://example.com",
+            score=95,
+            issues=[],
+            pages_crawled=3,
+        )
+        assert "example.com" in text
+        assert "3 page" in text
+
+    def test_template_narration_low_score(self):
+        """Low score → urgent narration."""
+        from backend.services.narration import _template_narration
+
+        issues = [
+            {"severity": "critical"},
+            {"severity": "critical"},
+            {"severity": "high"},
+        ]
+        text = _template_narration(
+            url="https://example.com",
+            score=30,
+            issues=issues,
+            pages_crawled=2,
+        )
+        assert "critical" in text.lower() or "significant" in text.lower()
+
+    def test_template_narration_timeout(self):
+        """Timeout → partial results narration."""
+        from backend.services.narration import _template_narration
+
+        text = _template_narration(
+            url="https://example.com",
+            score=50,
+            issues=[{"severity": "high"}],
+            pages_crawled=1,
+            timed_out=True,
+        )
+        assert "timed out" in text.lower()
+
+    def test_narration_prompt_structure(self):
+        """Narration prompt includes all required data."""
+        from backend.services.narration import _build_narration_prompt
+
+        prompt = _build_narration_prompt(
+            url="https://example.com",
+            score=75,
+            issues=[
+                {"severity": "high", "message": "Click failed"},
+                {"severity": "medium", "message": "Console error"},
+            ],
+            pages_crawled=3,
+            actions_taken=15,
+        )
+        assert "example.com" in prompt
+        assert "75/100" in prompt
+        assert "HIGH" in prompt
+        assert "MEDIUM" in prompt
+
+
+# ============================================================================
+# Sliding Window Rate Limiter — Unit Tests
+# ============================================================================
+
+class TestSlidingWindowLimiter:
+    def test_allows_within_limit(self):
+        from backend.services.rate_limit import _SlidingWindowLimiter
+        limiter = _SlidingWindowLimiter()
+
+        for i in range(10):
+            allowed, _ = limiter.is_allowed("key1", max_requests=10, window_seconds=60)
+            assert allowed is True
+
+    def test_blocks_over_limit(self):
+        from backend.services.rate_limit import _SlidingWindowLimiter
+        limiter = _SlidingWindowLimiter()
+
+        for _ in range(5):
+            limiter.is_allowed("key1", max_requests=5, window_seconds=60)
+
+        allowed, headers = limiter.is_allowed("key1", max_requests=5, window_seconds=60)
+        assert allowed is False
+        assert "Retry-After" in headers
+
+    def test_keys_isolated(self):
+        from backend.services.rate_limit import _SlidingWindowLimiter
+        limiter = _SlidingWindowLimiter()
+
+        for _ in range(5):
+            limiter.is_allowed("key1", max_requests=5, window_seconds=60)
+
+        allowed, _ = limiter.is_allowed("key2", max_requests=5, window_seconds=60)
+        assert allowed is True
+
+    def test_headers_include_limit_info(self):
+        from backend.services.rate_limit import _SlidingWindowLimiter
+        limiter = _SlidingWindowLimiter()
+
+        _, headers = limiter.is_allowed("key1", max_requests=10, window_seconds=60)
+        assert headers["X-RateLimit-Limit"] == "10"
+        assert "X-RateLimit-Remaining" in headers

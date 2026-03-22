@@ -13,7 +13,11 @@ from fastapi.responses import JSONResponse
 
 from backend.config import settings
 from backend.database import create_tables
-from backend.middleware import RequestLoggingMiddleware
+from backend.middleware import (
+    RequestLoggingMiddleware,
+    RateLimitMiddleware,
+    SecurityHeadersMiddleware,
+)
 from backend.routers import health, jobs, user
 
 
@@ -60,10 +64,15 @@ def create_app() -> FastAPI:
         redoc_url=None,
     )
 
-    # Request logging (added first → innermost middleware)
+    # Middleware stack (order matters: first added = innermost)
+    # 1. Request logging — innermost, runs last
     app.add_middleware(RequestLoggingMiddleware)
+    # 2. Rate limiting — before request processing
+    app.add_middleware(RateLimitMiddleware)
+    # 3. Security headers — adds to every response
+    app.add_middleware(SecurityHeadersMiddleware)
 
-    # CORS (added second → outermost, so it handles OPTIONS before anything else)
+    # CORS (outermost, so it handles OPTIONS before anything else)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],  # allow all origins (extensions have dynamic IDs)

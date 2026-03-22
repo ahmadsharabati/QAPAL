@@ -14,6 +14,8 @@ export interface Job {
   url: string;
   report: Report | null;
   error: string | null;
+  failure_stage: string | null;
+  trace_path: string | null;
   created_at: string | null;
   started_at: string | null;
   completed_at: string | null;
@@ -48,6 +50,7 @@ export interface Report {
   duration_ms: number;
   engine_version: string;
   generated_at: string;
+  narration?: string | null;
 }
 
 export interface Issue {
@@ -79,6 +82,9 @@ export interface QuotaInfo {
 export interface HealthResponse {
   status: string;
   db: string;
+  ai: string;
+  playwright: string;
+  disk: string;
   version: string;
 }
 

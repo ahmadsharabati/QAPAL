@@ -1,13 +1,16 @@
 {
   "manifest_version": 3,
-  "name": "QAPAL — Site Testing",
+  "name": "QAPAL — AI Site Testing",
   "version": "1.0.0",
-  "description": "Test any website for functional, UX, and accessibility issues.",
+  "description": "AI-powered website testing. Quick scans for instant checks, Deep Scans for full Playwright-based test execution across multiple pages.",
   "permissions": [
     "storage",
     "alarms",
     "activeTab",
     "scripting"
+  ],
+  "host_permissions": [
+    "http://localhost:8000/*"
   ],
   "background": {
     "service_worker": "src/background/service_worker.js",
@@ -15,7 +18,19 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "QAPAL Site Testing"
+    "default_title": "QAPAL — AI Site Testing",
+    "default_icon": {
+      "16": "public/icon-16.png",
+      "32": "public/icon-32.png",
+      "48": "public/icon-48.png",
+      "128": "public/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "public/icon-16.png",
+    "32": "public/icon-32.png",
+    "48": "public/icon-48.png",
+    "128": "public/icon-128.png"
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'; style-src 'self' 'unsafe-inline';"

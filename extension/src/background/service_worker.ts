@@ -172,6 +172,8 @@ async function runClientScan(): Promise<Job> {
     url: scanResult.pageUrl,
     report,
     error: null,
+    failure_stage: null,
+    trace_path: null,
     created_at: new Date().toISOString(),
     started_at: new Date().toISOString(),
     completed_at: new Date().toISOString(),

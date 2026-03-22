@@ -1,6 +1,13 @@
 /**
  * JobStatus — shows current job progress and result.
  * Works identically for both Quick Scan and Deep Scan results.
+ *
+ * Displays:
+ * - Progress bar during scan
+ * - Score + severity breakdown on completion
+ * - AI narration (if available)
+ * - Failure diagnostics (failure_stage, error details)
+ * - Issue list (capped at 8 with overflow indicator)
  */
 
 import React from "react";
@@ -49,9 +56,16 @@ export function JobStatus({ job }: JobStatusProps) {
         <p style={styles.message}>{job.message}</p>
       )}
 
-      {/* Error */}
-      {job.state === "failed" && job.error && (
-        <p style={styles.error}>{job.error}</p>
+      {/* Error with failure diagnostics */}
+      {job.state === "failed" && (
+        <div style={styles.errorSection}>
+          {job.failure_stage && (
+            <p style={styles.failureStage}>
+              Failed during: <strong>{job.failure_stage}</strong>
+            </p>
+          )}
+          {job.error && <p style={styles.error}>{job.error}</p>}
+        </div>
       )}
 
       {/* Report summary */}
@@ -66,6 +80,14 @@ export function JobStatus({ job }: JobStatusProps) {
               {job.report.score}/100
             </span>
           </div>
+
+          {/* AI Narration */}
+          {job.report.narration && (
+            <div style={styles.narrationBox}>
+              <p style={styles.narration}>{job.report.narration}</p>
+            </div>
+          )}
+
           <p style={styles.summary}>{job.report.summary}</p>
           <div style={styles.counts}>
             {job.report.critical_count > 0 && (
@@ -110,9 +132,41 @@ export function JobStatus({ job }: JobStatusProps) {
           {job.report.issues.length === 0 && (
             <p style={styles.noIssues}>No issues found! This page looks great.</p>
           )}
+
+          {/* Stats footer */}
+          <div style={styles.statsRow}>
+            <span style={styles.stat}>{job.report.pages_crawled} pages</span>
+            <span style={styles.statDivider}>&middot;</span>
+            <span style={styles.stat}>{job.report.actions_taken} actions</span>
+            <span style={styles.statDivider}>&middot;</span>
+            <span style={styles.stat}>{formatDuration(job.report.duration_ms)}</span>
+          </div>
           <p style={styles.meta}>
-            Scanned in {job.report.duration_ms}ms &middot; {job.report.engine_version}
+            {job.report.engine_version}
           </p>
+        </div>
+      )}
+
+      {/* Partial report on failed jobs */}
+      {job.state === "failed" && job.report && (
+        <div style={styles.report}>
+          <p style={styles.partialLabel}>Partial results (scan failed)</p>
+          <div style={styles.scoreRow}>
+            <span style={styles.scoreLabel}>Partial Score</span>
+            <span style={{ ...styles.scoreValue, color: "#6b7280" }}>
+              {job.report.score}/100
+            </span>
+          </div>
+          {job.report.narration && (
+            <div style={styles.narrationBox}>
+              <p style={styles.narration}>{job.report.narration}</p>
+            </div>
+          )}
+          {job.report.issues.length > 0 && (
+            <p style={styles.summary}>
+              Found {job.report.issues.length} issue(s) before failure
+            </p>
+          )}
         </div>
       )}
     </div>
@@ -125,6 +179,12 @@ function tryHostname(url: string): string {
   } catch {
     return url;
   }
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`;
 }
 
 function badgeColor(state: string): React.CSSProperties {
@@ -206,7 +266,19 @@ const styles: Record<string, React.CSSProperties> = {
     transition: "width 0.3s ease",
   },
   message: { fontSize: 13, color: "#6b7280", marginBottom: 4 },
-  error: { fontSize: 13, color: "#dc2626" },
+  errorSection: {
+    background: "#fef2f2",
+    border: "1px solid #fecaca",
+    borderRadius: 6,
+    padding: 10,
+    marginBottom: 8,
+  },
+  failureStage: {
+    fontSize: 12,
+    color: "#991b1b",
+    margin: "0 0 4px 0",
+  },
+  error: { fontSize: 13, color: "#dc2626", margin: 0 },
   report: { marginTop: 8 },
   scoreRow: {
     display: "flex",
@@ -215,6 +287,19 @@ const styles: Record<string, React.CSSProperties> = {
   },
   scoreLabel: { fontSize: 13, color: "#6b7280" },
   scoreValue: { fontSize: 18, fontWeight: 700 },
+  narrationBox: {
+    background: "#f0f9ff",
+    border: "1px solid #bae6fd",
+    borderRadius: 6,
+    padding: "8px 10px",
+    marginBottom: 10,
+  },
+  narration: {
+    fontSize: 13,
+    color: "#0c4a6e",
+    lineHeight: "1.4",
+    margin: 0,
+  },
   summary: { fontSize: 13, color: "#374151", marginBottom: 8 },
   counts: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 },
   countBadge: {
@@ -255,11 +340,26 @@ const styles: Record<string, React.CSSProperties> = {
   },
   moreIssues: { fontSize: 12, color: "#6b7280", marginTop: 4 },
   noIssues: { fontSize: 13, color: "#166534", textAlign: "center", padding: 12 },
+  statsRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 8,
+    paddingTop: 6,
+    borderTop: "1px solid #f3f4f6",
+  },
+  stat: { fontSize: 12, color: "#6b7280" },
+  statDivider: { fontSize: 12, color: "#d1d5db" },
   meta: {
     fontSize: 11,
     color: "#9ca3af",
-    marginTop: 8,
-    borderTop: "1px solid #f3f4f6",
-    paddingTop: 6,
+    marginTop: 4,
+  },
+  partialLabel: {
+    fontSize: 11,
+    color: "#991b1b",
+    fontWeight: 600,
+    textTransform: "uppercase",
+    marginBottom: 6,
   },
 };

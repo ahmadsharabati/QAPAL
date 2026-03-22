@@ -114,6 +114,16 @@ class QuotaResponse(BaseModel):
     resets_at: str  # ISO date of next month start
 
 
+class NarrationRequest(BaseModel):
+    """Internal: data passed to the narration service."""
+    url: str
+    score: int
+    issues_summary: str
+    pages_crawled: int
+    actions_taken: int
+
+
 class ErrorResponse(BaseModel):
     """Generic error response."""
     detail: str
+    error_code: Optional[str] = None
