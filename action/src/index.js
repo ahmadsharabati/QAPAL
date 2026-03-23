@@ -70,6 +70,16 @@ function endGroup() {
   console.log(`::endgroup::`);
 }
 
+function rankOf(severity) {
+  const s = (severity || "low").toLowerCase();
+  if (s === "critical") return 4;
+  if (s === "major" || s === "high") return 3;
+  if (s === "medium") return 2;
+  if (s === "minor" || s === "low") return 1;
+  if (s === "none") return 0;
+  return 1;
+}
+
 // ── HTTP client (built-in only) ─────────────────────────────────────────────
 
 function request(method, urlStr, body, headers) {
@@ -121,7 +131,13 @@ async function createJob(backendUrl, token, url, prdPath) {
 
   if (prdPath && fs.existsSync(prdPath)) {
     payload.prd_content = fs.readFileSync(prdPath, "utf8");
-    payload.options = { max_pages: 5 };
+    payload.options = { 
+      max_pages: 5,
+      credentials: {
+        username: getInput("test_user"),
+        password: getInput("test_pass")
+      }
+    };
     info(`  PRD spec loaded: ${prdPath}`);
   }
 
@@ -246,12 +262,92 @@ function printSummaryTable(report, issues) {
   }
 }
 
+async function postPullRequestComment(report, issues) {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) {
+    info("  [CI] GITHUB_TOKEN not set. Skipping PR comment.");
+    return;
+  }
+
+  const repo = process.env.GITHUB_REPOSITORY;
+  const eventPath = process.env.GITHUB_EVENT_PATH;
+  if (!repo || !eventPath) return;
+
+  let prNumber;
+  try {
+    const event = JSON.parse(fs.readFileSync(eventPath, "utf8"));
+    prNumber = event.pull_request?.number || event.number;
+  } catch (e) {
+    info("  [CI] Could not determine PR number from event path.");
+    return;
+  }
+
+  if (!prNumber) {
+    info("  [CI] Not a pull_request event. Skipping PR comment.");
+    return;
+  }
+
+  const commentTag = "<!-- QAPAL_REPORT -->";
+  const counts = { critical: 0, major: 0, medium: 0, minor: 0 };
+  for (const issue of issues) {
+    const sev = issue.severity?.toLowerCase();
+    if (sev in counts) counts[sev]++;
+  }
+
+  const statusEmoji = issues.length === 0 ? "✅" : (counts.critical > 0 ? "❌" : "⚠️");
+  const markdown = [
+    `### ${statusEmoji} QAPAL Scan Results ${commentTag}`,
+    "",
+    "| Metric | Value |",
+    "| :--- | :--- |",
+    `| **Score** | ${report.score ?? "N/A"} |`,
+    `| **Findings** | ${issues.length} |`,
+    `| **Critical** | ${counts.critical} |`,
+    `| **Major** | ${counts.major} |`,
+    `| **Pages** | ${report.pages_crawled ?? 1} |`,
+    "",
+    report.narration ? `> 📝 ${report.narration}` : "",
+    "",
+    report.screenshot ? `![Failure Screenshot](${report.screenshot})` : "",
+    "",
+    `[Full Report](${process.env.GITHUB_SERVER_URL}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID})`,
+  ].join("\n");
+
+  const apiUrl = `https://api.github.com/repos/${repo}/issues/${prNumber}/comments`;
+  const commonHeaders = {
+    Authorization: `token ${token}`,
+    Accept: "application/vnd.github.v3+json",
+    "User-Agent": "qapal-action",
+  };
+
+  try {
+    // 1. Find existing comment
+    const listRes = await request("GET", apiUrl, null, commonHeaders);
+    const existing = Array.isArray(listRes.body) 
+      ? listRes.body.find(c => c.body?.includes(commentTag)) 
+      : null;
+
+    if (existing) {
+      info(`  [CI] Updating existing PR comment: ${existing.id}`);
+      await request("PATCH", `https://api.github.com/repos/${repo}/issues/comments/${existing.id}`, 
+        { body: markdown }, commonHeaders);
+    } else {
+      info(`  [CI] Creating new PR comment`);
+      await request("POST", apiUrl, { body: markdown }, commonHeaders);
+    }
+  } catch (err) {
+    warning(`Failed to post PR comment: ${err.message}`);
+  }
+}
+
 // ── Main ────────────────────────────────────────────────────────────────────
 
 async function run() {
   try {
     const url = getInput("url", true);
     const token = getInput("token", true);
+    const testUser = getInput("test_user");
+    const testPass = getInput("test_pass");
     const backendUrl = getInput("backend_url") || "https://api.qapal.dev";
     const failOn = (getInput("fail_on") || "major").toLowerCase();
     const prdPath = getInput("prd") || "";
@@ -297,6 +393,13 @@ async function run() {
     setOutput("report_url", `${backendUrl}/v1/jobs/${job.id}/report`);
 
     printSummaryTable(report, issues);
+    await postPullRequestComment(report, issues);
+
+    if (report.reproduce_test) {
+      fs.writeFileSync("reproduce_test.ts", report.reproduce_test);
+      info("  [Artifact] Playwright reproduction script saved to: reproduce_test.ts");
+    }
+
     endGroup();
 
     // ── 4. Write annotations ───────────────────────────────────────────────
@@ -306,7 +409,7 @@ async function run() {
       endGroup();
     }
 
-    // ── 5. Pass / fail ─────────────────────────────────────────────────────
+    // ── 5. Pass / fail (Task 4.4 & 4.5) ───────────────────────────────────
     const failingIssues = issues.filter((i) => rankOf(i.severity) >= failOnRank);
 
     if (failOnRank === 0) {

@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     STARTER_TIER_LIMIT: int = 50
     PRO_TIER_LIMIT: int = -1  # unlimited
 
+    # --- Test Auth (Phase 3) ---
+    QAPAL_TEST_USER: Optional[str] = None
+    QAPAL_TEST_PASS: Optional[str] = None
+
     # --- Scan (Deep Scan engine) ---
     SCAN_TIMEOUT_SECONDS: int = 300
     SCAN_MAX_DEPTH: int = 2

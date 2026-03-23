@@ -179,12 +179,31 @@ def _extract_issues(exec_results: list) -> list:
 
             counter += 1
             action = step.get("action", "unknown")
-            is_nav = action == "navigate"
+            cat = step.get("category", "UNKNOWN")
+            
+            # ── Task 4.1 & 4.5: Mapping ───────────────────────────────
+            rule_map = {
+                "AUTH_REJECTED": ("AUTH_FAILED", "critical"),
+                "SELECTOR_NOT_FOUND": ("ELEMENT_MISSING", "high"),
+                "SEMANTIC_MISMATCH": ("INTENT_DRIFT", "high"),
+                "NAV_TIMEOUT": ("PAGE_LOAD_ERROR", "critical"),
+                "FLOW_INCOMPLETE": ("PLANNING_GAP", "medium"),
+            }
+            rule, severity = rule_map.get(cat, ("INTERACTION_FAILURE", "high"))
+            
+            msg = f"[{tc_id}] {cat}: {step.get('reason', 'unknown')}"
+            if cat == "AUTH_REJECTED":
+                msg = f"[{tc_id}] Login Rejected: Cannot proceed with authenticated flow."
+            elif cat == "SEMANTIC_MISMATCH":
+                msg = f"[{tc_id}] Intent Drift: AI found similar element but rejected repair to avoid false pass."
+            elif cat == "SELECTOR_NOT_FOUND" and not is_nav:
+                msg = f"[{tc_id}] Broken Flow: User cannot find/interact with {step.get('selector', '?')}."
+
             issues.append({
                 "id": f"issue-{counter:03d}",
-                "severity": "critical" if is_nav else "high",
-                "rule": "NAVIGATION_FAILURE" if is_nav else "INTERACTION_FAILURE",
-                "message": f"[{tc_id}] {action} failed: {step.get('reason', 'unknown')}",
+                "severity": severity,
+                "rule": rule,
+                "message": msg,
                 "page": test_url or "unknown",
                 "element": step.get("selector_used") if isinstance(step.get("selector_used"), str) else None,
             })
@@ -195,15 +214,21 @@ def _extract_issues(exec_results: list) -> list:
                 continue
 
             counter += 1
+            cat = assertion.get("category", "ASSERTION_FAILED")
             atype = assertion.get("type", "unknown")
-            is_url = atype.startswith("url_")
+            
             expected = assertion.get("expected", assertion.get("value", "?"))
             actual = assertion.get("actual", "?")
+            
+            msg = f"[{tc_id}] {atype} failed: expected={expected}, actual={actual}"
+            if cat == "ASSERTION_FAILED":
+                 msg = f"[{tc_id}] Business Logic Error: Expected state not reached (expected {expected})."
+
             issues.append({
                 "id": f"issue-{counter:03d}",
-                "severity": "critical" if is_url else "high",
-                "rule": "URL_ASSERTION_FAILED" if is_url else "ELEMENT_ASSERTION_FAILED",
-                "message": f"[{tc_id}] {atype}: expected={expected}, actual={actual}",
+                "severity": "critical" if atype.startswith("url_") else "high",
+                "rule": "ASSERTION_ERROR",
+                "message": msg,
                 "page": test_url or "unknown",
                 "element": None,
             })
@@ -247,7 +272,72 @@ def _extract_issues(exec_results: list) -> list:
     return issues
 
 
-# ── Scoring ──────────────────────────────────────────────────────────────
+def _generate_playwright_test(exec_results: list, credentials: Optional[dict] = None) -> str:
+    """Generate a standalone Playwright TypeScript test from execution results."""
+    creds_user = (credentials or {}).get("username", "")
+    creds_pass = (credentials or {}).get("password", "")
+
+    lines = [
+        "import { test, expect } from '@playwright/test';",
+        "",
+        "/**",
+        " * QAPAL Reproduction Script",
+        " * Run with: QAPAL_TEST_USER=xxx QAPAL_TEST_PASS=yyy npx playwright test",
+        " */",
+        f"const TEST_USER = process.env.QAPAL_TEST_USER || '{creds_user or 'admin@example.com'}';",
+        f"const TEST_PASS = process.env.QAPAL_TEST_PASS || '{creds_pass or 'password123'}';",
+        "",
+        "test.describe('QAPAL Reproduced User Flows', () => {",
+    ]
+
+    for result in exec_results:
+        tc_id = result.get("id", "test")
+        tc_name = result.get("name", tc_id)
+        lines.append(f"  test('{tc_name}', async ({{ page }}) => {{")
+
+        for step in result.get("steps", []):
+            action = step.get("action")
+            sel = step.get("selector_used") or step.get("selector")
+            
+            if action == "navigate":
+                lines.append(f"    await page.goto('{step.get('url')}');")
+            elif action == "click":
+                if isinstance(sel, dict) and sel.get("strategy") == "role":
+                    role = sel["value"]["role"]
+                    name = sel["value"].get("name", "")
+                    lines.append(f"    await page.getByRole('{role}', {{ name: '{name}', exact: false }}).click();")
+                elif isinstance(sel, dict) and sel.get("strategy") == "text":
+                    lines.append(f"    await page.getByText('{sel['value']}', {{ exact: false }}).click();")
+                else:
+                    lines.append(f"    // Click fallback for {action}")
+            elif action == "fill":
+                val = step.get("value", "")
+                # ── Auth Injection (Task 4.6) ─────────────────────────
+                fill_val = f"'{val}'"
+                if creds_user and val == creds_user: fill_val = "TEST_USER"
+                if creds_pass and val == creds_pass: fill_val = "TEST_PASS"
+
+                if isinstance(sel, dict) and sel.get("strategy") == "role":
+                    role = sel["value"]["role"]
+                    name = sel["value"].get("name", "")
+                    lines.append(f"    await page.getByRole('{role}', {{ name: '{name}' }}).fill({fill_val});")
+                else:
+                    lines.append(f"    // Fill fallback for {action}")
+        
+        for assertion in result.get("assertions", []):
+            atype = assertion.get("type", "")
+            if atype == "url_contains":
+                lines.append(f"    await expect(page).toHaveURL(/.*{assertion.get('value')}.*/);")
+            elif atype == "element_visible":
+                sel = assertion.get("selector")
+                if isinstance(sel, dict) and sel.get("strategy") == "role":
+                    lines.append(f"    await expect(page.getByRole('{sel['value']['role']}', {{ name: '{sel['value'].get('name', '')}' }})).toBeVisible();")
+
+        lines.append("  });")
+        lines.append("")
+
+    lines.append("});")
+    return "\n".join(lines)
 
 
 def _calculate_score(issues: list) -> int:
@@ -266,18 +356,14 @@ def _build_report(
     exec_results: list,
     duration_ms: int,
     timeout_stage: Optional[str] = None,
+    credentials:   Optional[dict] = None,
 ) -> dict:
     """
     Assemble the final Report dict matching the extension's Report interface.
-
-    Both Quick Scan and Deep Scan produce the same shape so the popup UI
-    renders them identically.
-
-    Args:
-        timeout_stage: If set, the pipeline stage that timed out (e.g. "crawl", "execute").
     """
     issues = _extract_issues(exec_results)
     score = _calculate_score(issues)
+    repro_test = _generate_playwright_test(exec_results, credentials=credentials)
 
     counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
     for issue in issues:
@@ -298,6 +384,7 @@ def _build_report(
         "summary": summary,
         "score": score,
         "issues": issues,
+        "reproduce_test": repro_test,
         "critical_count": counts["critical"],
         "high_count": counts["high"],
         "medium_count": counts["medium"],
@@ -351,7 +438,15 @@ async def run_deep_scan(job_id: str) -> None:
         _update_job(job_id, log=log, progress=15, message="Crawling site structure...")
         log.info("Crawling %s (max_pages=%d)", url, max_pages)
 
-        async with Crawler(locator_db, headless=True, state_graph=sg) as crawler:
+        # Merge job options with default settings for auth
+        credentials = options.get("credentials") or {}
+        if (credentials.get("username") or credentials.get("password")) and "url" not in credentials:
+            credentials["url"] = url # Default login page to base URL if not specified
+
+        async with Crawler(
+            locator_db, headless=True, state_graph=sg, 
+            credentials=credentials
+        ) as crawler:
             crawl_results = await asyncio.wait_for(
                 crawler.spider_crawl(
                     start_urls=[url],
@@ -404,6 +499,7 @@ async def run_deep_scan(job_id: str) -> None:
             locator_db,
             headless=True,
             ai_client=ai_client,
+            credentials=credentials,
             state_graph=sg,
             trace_dir=str(trace_dir),
             logger=log,
@@ -422,7 +518,7 @@ async def run_deep_scan(job_id: str) -> None:
         # ── 6. Report (90→95%) ────────────────────────────────────────
         stage = "report"
         duration_ms = int((time.monotonic() - start_time) * 1000)
-        report = _build_report(url, crawl_results, exec_results, duration_ms)
+        report = _build_report(url, crawl_results, exec_results, duration_ms, credentials=credentials)
 
         # ── 7. Narration (95→100%) ────────────────────────────────────
         _update_job(job_id, log=log, progress=95, message="Generating summary...")
@@ -466,6 +562,7 @@ async def run_deep_scan(job_id: str) -> None:
         report = _build_report(
             url, crawl_results, exec_results, duration_ms,
             timeout_stage=stage,
+            credentials=credentials,
         )
 
         # Template narration for timeouts (skip AI to save time)
@@ -499,6 +596,7 @@ async def run_deep_scan(job_id: str) -> None:
         if crawl_results or exec_results:
             partial_report = _build_report(
                 url, crawl_results, exec_results, duration_ms,
+                credentials=credentials,
             )
             partial_report["summary"] += f" (failed during {stage})"
 

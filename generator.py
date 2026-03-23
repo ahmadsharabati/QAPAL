@@ -1258,6 +1258,48 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
 
         return {**plan, "steps": steps}
 
+    def _is_auth_step(self, step: dict) -> bool:
+        """Heuristic check if a step is part of an auth flow (fill email/pass)."""
+        action = step.get("action")
+        if action not in ("fill", "type"): return False
+        sel = step.get("selector", {})
+        val = str(sel.get("value", "")).lower()
+        return any(x in val for x in ("email", "user", "pass", "login"))
+
+    def _sanitize_plan(self, plan: dict) -> Optional[dict]:
+        """Final sanity check for AI plans to catch loops and orphaned starts."""
+        steps = plan.get("steps", [])
+        if not steps: 
+            log.warning("Plan %s has no steps", plan.get("test_id"))
+            return None
+        
+        # 1. Length check (Task 4.3)
+        if len(steps) > 25:
+             log.warning("Plan %s too long (%d steps), truncating", plan.get("test_id"), len(steps))
+             plan["steps"] = steps[:25]
+             steps = plan["steps"]
+
+        # 2. Duplicate consecutive steps (hallucinated loops)
+        sanitized_steps = []
+        for s in steps:
+            if not sanitized_steps:
+                sanitized_steps.append(s)
+                continue
+            last = sanitized_steps[-1]
+            if s.get("action") == last.get("action") and s.get("selector") == last.get("selector") and s.get("value") == last.get("value"):
+                continue # skip duplicate
+            sanitized_steps.append(s)
+        plan["steps"] = sanitized_steps
+
+        # 3. Start step coherence
+        first_action = sanitized_steps[0].get("action")
+        if first_action not in ("navigate", "wait") and not self._is_auth_step(sanitized_steps[0]):
+             # If it starts with 'click' without context, it's likely a garbage plan.
+             log.warning("Plan %s starts with orphaned action: %s", plan.get("test_id"), first_action)
+             return None
+             
+        return plan
+
     def _parse_plans(self, text: str, locator_map: dict, base_url: str = "", credentials: Optional[dict] = None, locators: Optional[list] = None) -> List[dict]:
         text = text.strip()
         # Strip <think>...</think> reasoning blocks emitted by reasoning models
@@ -1363,6 +1405,11 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
 
                 # Replace hallucinated element assertions with safe url_contains fallback.
                 plan_data = self._fix_element_assertions(plan_data)
+
+                # ── Phase 4: Plan Sanitization ─────────────────────
+                plan_data = self._sanitize_plan(plan_data)
+                if not plan_data:
+                    continue
 
                 parsed_plans.append(plan_data)
             except Exception as e:

@@ -344,6 +344,30 @@ async def resolve_locator(
             except Exception:
                 pass
 
+    # 2c. Heuristic Fallback (Role/Text/Title search)
+    # If explicit selectors fail, search for any element that matches the intent
+    # of the step (role + name). This is faster than AI rediscovery.
+    intent_role = selector.get("value", {}).get("role") if isinstance(selector.get("value"), dict) else ""
+    intent_name = (selector.get("value", {}).get("name") if isinstance(selector.get("value"), dict) else str(selector.get("value", "")))
+
+    if intent_name and intent_name != "?" and len(str(intent_name)) > 1:
+        # Try finding by role + name first
+        if intent_role in _ARIA_ROLES:
+            try:
+                heur_loc = ctx.get_by_role(intent_role, name=intent_name, exact=False)
+                if await heur_loc.count() == 1:
+                    return heur_loc, "heuristic:role_name"
+            except Exception:
+                pass
+
+        # Fallback to pure text/label search
+        try:
+            heur_loc = ctx.get_by_text(str(intent_name), exact=False)
+            if await heur_loc.count() == 1:
+                return heur_loc, "heuristic:text"
+        except Exception:
+            pass
+
     # 3. AI rediscovery
     if AI_REDISCOVERY and ai_client is not None:
         loc, strategy = await _ai_rediscover(page, selector, db, page_url, ai_client)

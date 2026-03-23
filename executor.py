@@ -29,7 +29,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 from playwright.async_api import (
     Browser,
@@ -216,8 +216,8 @@ def _step_pass(step: dict, detail: str = "", strategy: str = "page") -> dict:
             "selector": step.get("selector"), "strategy": strategy, "detail": detail}
 
 
-def _step_fail(step: dict, reason: str, screenshot: Optional[str] = None, strategy: str = "page") -> dict:
-    return {"status": "fail", "action": step.get("action"),
+def _step_fail(step: dict, reason: str, category: str = "UNKNOWN", screenshot: Optional[str] = None, strategy: str = "page") -> dict:
+    return {"status": "fail", "action": step.get("action"), "category": category,
             "selector": step.get("selector"), "strategy": strategy, "reason": reason, "screenshot": screenshot}
 
 
@@ -228,8 +228,8 @@ def _assert_pass(a: dict, actual=None) -> dict:
     return r
 
 
-def _assert_fail(a: dict, reason: str, actual=None) -> dict:
-    r = {"status": "fail", "type": a["type"], "reason": reason}
+def _assert_fail(a: dict, reason: str, actual=None, category: str = "ASSERTION_FAILED") -> dict:
+    r = {"status": "fail", "type": a["type"], "category": category, "reason": reason}
     if actual is not None:
         r["actual"] = actual
     return r
@@ -338,7 +338,7 @@ async def _execute_step(
                 )
             return _step_pass(step, f"navigated to {url}"), new_url
         except Exception as e:
-            return _step_fail(step, f"Navigation failed: {e}"), page_url
+            return _step_fail(step, f"Navigation failed: {e}", category=FailureCategory.NAV_TIMEOUT), page_url
 
     if action == "refresh":
         await page.reload(wait_until="domcontentloaded")
@@ -370,7 +370,7 @@ async def _execute_step(
             if wait_loc is None and wait_state in ("hidden", "detached"):
                 return _step_pass(step, f"element already {wait_state} (not found)"), page_url
             if wait_loc is None:
-                return _step_fail(step, f"Element not found for wait state={wait_state}"), page_url
+                return _step_fail(step, f"Element not found for wait state={wait_state}", category=FailureCategory.SELECTOR_NOT_FOUND), page_url
             try:
                 # Map "enabled"/"disabled"/"editable" to Playwright-supported states
                 pw_state = wait_state
@@ -395,7 +395,7 @@ async def _execute_step(
                     await wait_loc.first.wait_for(state=pw_state, timeout=step.get("timeout", ACTION_TIMEOUT))
                     return _step_pass(step, f"element reached state={wait_state}"), page_url
             except Exception as e:
-                return _step_fail(step, f"wait for element state={wait_state} failed: {e}"), page_url
+                return _step_fail(step, f"wait for element state={wait_state} failed: {e}", category=FailureCategory.NAV_TIMEOUT), page_url
         if step.get("for_url_contains"):
             try:
                 await page.wait_for_url(
@@ -468,7 +468,7 @@ async def _execute_step(
         )
         if loc is None:
             ss = await _screenshot(page, f"not_found_{action}")
-            return _step_fail(step, strategy, ss), page_url
+            return _step_fail(step, strategy, category=FailureCategory.SELECTOR_NOT_FOUND, screenshot=ss), page_url
 
     # Actionability guard: scroll into viewport then wait for stable DOM state.
     # Eliminates ~10% of interaction failures from off-screen or animating elements.
@@ -968,6 +968,17 @@ async def _run_assertion(
         return _assert_fail(a, f"Assertion error: {e}")
 
 
+# ── Failure Taxonomy (Phase 4) ────────────────────────────────────────
+
+class FailureCategory:
+    AUTH_REJECTED = "AUTH_REJECTED"
+    SELECTOR_NOT_FOUND = "SELECTOR_NOT_FOUND"
+    SEMANTIC_MISMATCH = "SEMANTIC_MISMATCH"
+    NAV_TIMEOUT = "NAV_TIMEOUT"
+    ASSERTION_FAILED = "ASSERTION_FAILED"
+    FLOW_INCOMPLETE = "FLOW_INCOMPLETE"
+    UNKNOWN = "UNKNOWN"
+
 # ── Executor ──────────────────────────────────────────────────────────
 
 class Executor:
@@ -1027,6 +1038,7 @@ class Executor:
         self._pw          = None
         self._browser     = None
         self._crawler     = None
+        self._healer      = None
 
     async def start(self):
         self._pw          = await async_playwright().start()
@@ -1054,6 +1066,13 @@ class Executor:
         self._crawler._pw      = self._pw
         self._crawler._device_kwargs = self._device_kwargs
         self._crawler._started = True
+        
+        # Initialize the surgical step healer
+        try:
+            from engine.repair.step_healer import StepHealer
+            self._healer = StepHealer(self._ai_client, self._db)
+        except ImportError:
+            self._healer = None
 
     async def close(self):
         if self._browser:
@@ -1271,7 +1290,36 @@ class Executor:
                 step_results.append(result)
 
                 if result["status"] == "fail":
-                    # ── Unknown-state recovery gate ─────────────────────
+                    # ── Phase 1: Surgical Step Repair (Healer) ─────────
+                    if self._healer and not step.get("_healed"):
+                        log.warning("Step %d failed. Attempting surgical repair...", i + 1)
+                        # Ensure we have fresh locators for the repair
+                        await self._crawler.on_page_load(page, current_url)
+                        available_locators = self._db.get_all(current_url, valid_only=True)
+                        
+                        repair_step = await self._healer.repair_step(
+                            failed_step=step,
+                            error_reason=result.get("reason", "unknown"),
+                            current_url=current_url,
+                            available_locators=available_locators,
+                        )
+                        
+                        if repair_step:
+                            # ── Task 4.2: Intent Locking ──────────────────
+                            if repair_step.get("action") != step.get("action"):
+                                log.error("Repair rejected: action drift detected (%s -> %s)", 
+                                           step.get("action"), repair_step.get("action"))
+                                result["category"] = FailureCategory.SEMANTIC_MISMATCH
+                                result["reason"] = f"Repair rejected: intent changed from {step.get('action')} to {repair_step.get('action')}"
+                                # Keep the failure and move on (do not retry)
+                            else:
+                                log.info("Repair success: replacing step index %d", i)
+                                repair_step["_healed"] = True
+                                steps[i] = repair_step
+                                continue # retry the SAME index with the repaired step
+                    # ────────────────────────────────────────────────
+
+                    # ── Unknown-state recovery gate (Full Replan) ──────
                     dom_hash = await _compute_dom_hash(page)
                     if (
                         _detect_unknown_state(self._db, current_url, dom_hash)

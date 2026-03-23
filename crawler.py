@@ -401,6 +401,11 @@ async def _build_context(
         page = await ctx.new_page()
         try:
             await _run_login(page, credentials)
+            # ── Task 4.4: Auth Verification ───────────────────────────
+            auth_ok = await _verify_auth_state(page, credentials)
+            if not auth_ok:
+                raise RuntimeError("Auth verification failed: session not established or indicators missing")
+
             state = await ctx.storage_state()
             db.save_session(
                 domain        = domain,
@@ -416,6 +421,31 @@ async def _build_context(
             raise RuntimeError(f"Login failed: {e}") from e
 
     return await browser.new_context(**dk)
+
+
+async def _verify_auth_state(page: Page, credentials: dict) -> bool:
+    """Check if we are actually logged in based on cookies or UI markers."""
+    await wait_for_stable(page, timeout=5000)
+    
+    # 1. Check for session cookies
+    cookies = await page.context.cookies()
+    if not cookies:
+        log.warning("No cookies found after login attempt")
+        return False
+        
+    # 2. Check for UI indicators (e.g. Dashboard text, Logout button)
+    indicators = ["logout", "sign out", "dashboard", "profile", "account", "settings"]
+    content = (await page.content()).lower()
+    
+    found = any(ind in content for ind in indicators)
+    if not found:
+         # Also check if login form is still present (negative indicator)
+         login_form_present = await page.locator("input[type=password]").is_visible()
+         if login_form_present:
+             log.warning("Login form still visible after login attempt")
+             return False
+             
+    return True
 
 
 _USERNAME_SELECTORS = [
