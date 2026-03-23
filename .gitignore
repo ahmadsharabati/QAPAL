@@ -21,6 +21,7 @@ node_modules/
 # Data files (large / runtime-generated)
 locators.json
 reports/
+:memory:          # TinyDB in-memory snapshot — never commit
 
 # Old plan archives
 plans_final_v*/

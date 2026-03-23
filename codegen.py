@@ -25,8 +25,14 @@ from playwright.sync_api import Page, expect
 # ── Selector translation ─────────────────────────────────────────────
 
 def _escape(s: str) -> str:
-    """Escape a string for use inside Python string literals."""
-    return s.replace("\\", "\\\\").replace('"', '\\"')
+    """Escape a string for use inside Python double-quoted string literals."""
+    return (
+        s.replace("\\", "\\\\")
+         .replace('"', '\\"')
+         .replace("\n", "\\n")
+         .replace("\r", "\\r")
+         .replace("\t", "\\t")
+    )
 
 
 def _selector_to_code(sel: dict) -> str:
@@ -202,15 +208,15 @@ def _assertion_to_code(a: dict) -> List[str]:
     if atype == "url_equals":
         lines.append(f'expect(page).to_have_url("{_escape(str(value))}")')
     elif atype == "url_contains":
-        escaped = _escape(re.escape(str(value)))
-        lines.append(f'expect(page).to_have_url(re.compile(r".*{escaped}.*"))')
+        # Use re.compile with re.escape so dots in URLs are treated literally
+        # but the overall match is a substring check (not full-string)
+        lines.append(f'expect(page).to_have_url(re.compile(r".*{re.escape(str(value))}.*"))')
     elif atype == "url_matches":
         lines.append(f'expect(page).to_have_url(re.compile(r"{_escape(str(value))}"))')
     elif atype == "title_equals":
         lines.append(f'expect(page).to_have_title("{_escape(str(value))}")')
     elif atype == "title_contains":
-        escaped = _escape(re.escape(str(value)))
-        lines.append(f'expect(page).to_have_title(re.compile(r".*{escaped}.*"))')
+        lines.append(f'expect(page).to_have_title(re.compile(r".*{re.escape(str(value))}.*"))')
 
     # Element assertions (need selector)
     elif sel:
