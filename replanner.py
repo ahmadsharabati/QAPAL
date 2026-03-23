@@ -124,8 +124,9 @@ class Replanner:
         try:
             raw = await self._ai.acomplete(
                 prompt,
-                system_prompt = _REPLANNER_SYSTEM,
-                max_tokens    = 4096,
+                system_prompt  = _REPLANNER_SYSTEM,
+                max_tokens     = 4096,
+                model_override = self._ai.small_model,
             )
         except Exception as e:
             raise ReplanningError(f"AI call failed: {e}")
