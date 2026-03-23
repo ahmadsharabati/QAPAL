@@ -14,10 +14,9 @@ import { runFormsChecks } from "./checks/forms";
 import { runLinksChecks } from "./checks/links";
 import { runPerformanceChecks } from "./checks/performance";
 
-(async (): Promise<ScanResult> => {
+export async function runQapalScan(): Promise<ScanResult> {
   const start = performance.now();
 
-  // Run all synchronous DOM checks
   const issues = [
     ...runA11yChecks(),
     ...runSeoChecks(),
@@ -33,8 +32,14 @@ import { runPerformanceChecks } from "./checks/performance";
     pageUrl: location.href,
     pageTitle: document.title || "(untitled)",
     duration_ms,
-    checksRun: 26, // total rule count across all modules
+    checksRun: 26,
   };
 
   return result;
-})();
+}
+
+// Expose to window for CLI / Playwright injection
+(window as any).runQapalScan = runQapalScan;
+
+// For extension usage (executeScript returns the last expression)
+runQapalScan();

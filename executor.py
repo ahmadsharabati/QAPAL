@@ -679,6 +679,16 @@ async def _execute_step(
             await loc.blur()
 
         else:
+            # ── Hardening: bridge AI actions that look like assertions ────────
+            if action.startswith("assert_") or action.startswith("element_"):
+                atype = action
+                if atype.startswith("assert_"):
+                    atype = atype[7:]
+                # Create a pseudo-assertion dict from the step
+                a = {**step, "type": atype}
+                res = await _run_assertion(page, a, db, page_url, ai_client)
+                return res, page_url
+
             return _step_fail(step, f"Unknown action: {action}"), page_url
 
     except PlaywrightError as e:
@@ -1000,6 +1010,7 @@ class Executor:
         device:       Optional[str]   = None,
         viewport:     Optional[tuple] = None,
         trace_dir:    Optional[str]   = None,
+        logger:       Optional[any]   = None,
     ):
         self._db          = db
         self._headless    = headless if headless is not None else (
@@ -1011,6 +1022,7 @@ class Executor:
         self._device_name = device or os.getenv("QAPAL_DEVICE", None)
         self._viewport    = viewport  # (width, height) tuple or None
         self._trace_dir   = trace_dir  # if set, save Playwright traces for failed tests
+        self._log         = logger or log
         self._device_kwargs: dict = {}
         self._pw          = None
         self._browser     = None
@@ -1352,15 +1364,15 @@ class Executor:
                 result = await self.run(plan)
             async with log_lock:
                 icon = "✓" if result["status"] == "pass" else "✗"
-                log.info("  %s %s %s  (%dms)",
+                self._log.info("  %s %s %s  (%dms)",
                          tc_id, icon, result["status"], result["duration_ms"])
                 if result["status"] == "fail":
                     for s in result.get("steps", []):
                         if s.get("status") == "fail":
-                            log.error("    step fail: %s", s.get("reason"))
+                            self._log.error("    step fail: %s", s.get("reason"))
                     for a in result.get("assertions", []):
                         if a.get("status") == "fail":
-                            log.error("    assert fail: %s", a.get("reason"))
+                            self._log.error("    assert fail: %s", a.get("reason"))
             return result
 
         return list(await asyncio.gather(*(_one(p) for p in plans)))

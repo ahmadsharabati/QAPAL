@@ -140,7 +140,12 @@ export function JobForm({
                 </div>
               </form>
               {quotaRemaining !== undefined && quotaRemaining <= 0 && (
-                <p style={styles.error}>Monthly scan quota exceeded</p>
+                <div style={styles.quotaBox}>
+                  <p style={styles.error}>Monthly scan quota exceeded</p>
+                  <a href="#" style={styles.upgradeLink} onClick={(e) => e.preventDefault()}>
+                    Upgrade to Starter (50/mo) &rarr;
+                  </a>
+                </div>
               )}
             </>
           )}
@@ -246,5 +251,18 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: "center",
     padding: "12px 0",
     margin: 0,
+  },
+  quotaBox: {
+    padding: 8,
+    background: "#fef2f2",
+    borderRadius: 6,
+    border: "1px solid #fee2e2",
+    marginTop: 8,
+  },
+  upgradeLink: {
+    fontSize: 11,
+    color: "#7c3aed",
+    textDecoration: "none",
+    fontWeight: 600,
   },
 };

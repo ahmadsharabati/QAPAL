@@ -570,6 +570,7 @@ async def crawl_page(
                 "actionable": False,
             })
 
+    print(f"DEBUG: Found {len(all_elements)} elements on {url}")
     # Upsert into DB
     new_count = updated_count = 0
     for el in all_elements:
@@ -695,6 +696,8 @@ class Crawler:
         headless:     Optional[bool] = None,
         credentials:  Optional[dict] = None,
         state_graph=None,
+        device:       Optional[str]  = None,
+        viewport:     Optional[tuple] = None,
     ):
         self._db          = db
         self._headless    = headless if headless is not None else (
@@ -702,6 +705,8 @@ class Crawler:
         )
         self._credentials = credentials
         self._state_graph = state_graph
+        self._device      = device
+        self._viewport    = viewport
         self._pw          = None
         self._browser     = None
         self._started     = False

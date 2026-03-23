@@ -194,7 +194,7 @@ export function App() {
       getQuota().then(setQuota).catch(() => {});
     } catch (e) {
       if (e instanceof ApiError) {
-        setError(e.detail);
+        setError(e.errorMessage);
       } else {
         setError("Failed to start scan");
       }

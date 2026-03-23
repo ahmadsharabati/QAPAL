@@ -29,12 +29,8 @@ export default defineConfig({
       },
       output: {
         entryFileNames: (chunkInfo) => {
-          if (chunkInfo.name === "service_worker") {
-            return "src/background/service_worker.js";
-          }
-          if (chunkInfo.name === "scanner") {
-            return "src/content/scanner.js";
-          }
+          if (chunkInfo.name === "service_worker") return "src/background/service_worker.js";
+          if (chunkInfo.name === "scanner") return "src/content/scanner.js";
           return "assets/[name]-[hash].js";
         },
       },

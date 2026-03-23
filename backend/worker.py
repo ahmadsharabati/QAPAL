@@ -380,6 +380,7 @@ async def run_deep_scan(job_id: str) -> None:
             ai_client,
             state_graph=sg,
             num_tests=settings.SCAN_NUM_TESTS,
+            logger=log,
         )
         plans = await asyncio.to_thread(
             generator.generate_plans_from_prd, prd_content, [url]
@@ -405,6 +406,7 @@ async def run_deep_scan(job_id: str) -> None:
             ai_client=ai_client,
             state_graph=sg,
             trace_dir=str(trace_dir),
+            logger=log,
         ) as executor:
             exec_results = await asyncio.wait_for(
                 executor.run_parallel(
@@ -520,6 +522,7 @@ async def run_deep_scan(job_id: str) -> None:
             except Exception:
                 pass
         try:
-            Path(db_path).unlink(missing_ok=True)
+            # Path(db_path).unlink(missing_ok=True) # DISABLED FOR DEBUGGING
+            pass
         except Exception:
             pass

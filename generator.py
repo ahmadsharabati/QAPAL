@@ -146,6 +146,7 @@ class TestGenerator:
         num_tests:            Optional[int]      = None,
         negative_tests:       bool               = False,
         compiled_model_path:  Optional[str]      = None,
+        logger:               Optional[any]      = None,
     ):
         self._db                  = db
         self._ai                  = ai_client
@@ -155,6 +156,7 @@ class TestGenerator:
         self._num_tests           = num_tests  # explicit count; overrides max_cases/default-5
         self._negative_tests      = negative_tests
         self._compiled_model_path = compiled_model_path
+        self._log                 = logger or log
 
     def generate_plans_from_prd(self, prd_content: str, urls: List[str], credentials: Optional[dict] = None) -> List[dict]:
         """
@@ -176,6 +178,9 @@ class TestGenerator:
         # - Exclude /admin/* pages — not relevant for user-facing tests
         # - For /product/* pages, keep only the most-crawled representative page
         all_locs = self._db.get_all_locators(valid_only=True)
+        print(f"DEBUG: Generator found {len(all_locs)} locators in DB")
+        self._log.info("Planning with %d total locators from DB", len(all_locs))
+        self._log.info("Planning with %d total locators from DB", len(all_locs))
 
         # Find the single most-crawled product page (most hit_count sum)
         from urllib.parse import urlparse

@@ -86,15 +86,16 @@ def create_job(
 
     # Quota check
     if not check_quota(db, user):
-        remaining = get_remaining(db, user)
         limit = _tier_limit(user.tier)
         raise HTTPException(
-            status_code=403,
-            detail=(
-                f"Monthly scan quota exceeded ({limit} scans/month on "
-                f"{user.tier.title()} tier). Resets on the 1st of next month. "
-                f"Upgrade to Starter (50/month) or Pro (unlimited) for more scans."
-            ),
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "QUOTA_EXCEEDED",
+                "message": (
+                    f"Monthly scan quota exceeded ({limit} scans/month on "
+                    f"{user.tier.title()} tier). Upgrade to Starter or Pro for more scans."
+                )
+            },
         )
 
     # Tier-based max_pages cap

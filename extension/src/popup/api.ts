@@ -96,7 +96,7 @@ async function apiFetch<T>(
 
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    const detail = (body as { detail?: string }).detail || response.statusText;
+    const detail = (body as { detail?: any }).detail || response.statusText;
     throw new ApiError(response.status, detail);
   }
 
@@ -109,12 +109,20 @@ async function apiFetch<T>(
 }
 
 export class ApiError extends Error {
+  public errorCode?: string;
+  public errorMessage: string;
+
   constructor(
     public status: number,
-    public detail: string
+    public detail: string | { error?: string; message?: string }
   ) {
-    super(`API ${status}: ${detail}`);
+    const msg = typeof detail === "string" ? detail : (detail.message || "Unknown error");
+    super(`API ${status}: ${msg}`);
     this.name = "ApiError";
+    this.errorMessage = msg;
+    if (typeof detail !== "string") {
+      this.errorCode = detail.error;
+    }
   }
 }
 
