@@ -1,0 +1,72 @@
+name: 'QAPAL Scan'
+description: >
+  AI-powered accessibility, SEO, performance, and WCAG compliance scan.
+  Runs on every pull request. Fails the build on issues above the configured
+  severity threshold and posts inline annotations to the PR diff.
+
+branding:
+  icon: 'shield'
+  color: 'purple'
+
+inputs:
+  url:
+    description: >
+      URL to scan. Use your staging environment URL so every PR is tested
+      against a real deployed build.
+    required: true
+
+  token:
+    description: >
+      QAPAL API token. Store as a repository secret:
+      Settings → Secrets → QAPAL_TOKEN
+    required: true
+
+  fail_on:
+    description: >
+      Minimum severity level that fails the build.
+      Options: critical | major | medium | minor | none
+      Default is "major" — "critical" will fail on nearly every site.
+    required: false
+    default: 'major'
+
+  prd:
+    description: >
+      Optional path to a plain-English test specification file (.md).
+      When provided, QAPAL runs a Deep Scan with AI-generated behavioral
+      tests derived from the spec. When omitted, runs a Quick Scan only.
+    required: false
+    default: ''
+
+  backend_url:
+    description: >
+      QAPAL backend URL. Override for self-hosted deployments.
+    required: false
+    default: 'https://api.qapal.dev'
+
+  poll_interval:
+    description: >
+      How often (in seconds) to poll for scan completion. Default: 5.
+    required: false
+    default: '5'
+
+  timeout:
+    description: >
+      Maximum wait time (in seconds) for a scan to complete. Default: 300.
+    required: false
+    default: '300'
+
+outputs:
+  score:
+    description: 'Overall scan score (0–100, higher is better)'
+  issues_count:
+    description: 'Total number of issues found across all categories'
+  critical_count:
+    description: 'Number of critical-severity issues'
+  report_url:
+    description: 'URL to the full QAPAL report (requires authentication)'
+  job_id:
+    description: 'QAPAL job ID for this scan run'
+
+runs:
+  using: 'node20'
+  main: 'src/index.js'

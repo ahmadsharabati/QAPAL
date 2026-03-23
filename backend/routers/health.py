@@ -46,6 +46,19 @@ def _check_playwright() -> str:
         return "not_installed"
 
 
+def _check_browser_pool() -> str:
+    """Report the browser pool state: ok / degraded / stopped."""
+    try:
+        from backend.services.browser_pool import browser_pool
+        if not browser_pool._started:
+            return "stopped"
+        if not browser_pool.is_healthy:
+            return "degraded"
+        return f"ok ({browser_pool.active}/{browser_pool._size} active)"
+    except Exception:
+        return "unknown"
+
+
 def _check_disk() -> str:
     """Check available disk space in /tmp (where traces and temp DBs live)."""
     try:
@@ -75,12 +88,15 @@ def health_check(db: Session = Depends(get_db)):
     ai_status = _check_ai()
     pw_status = _check_playwright()
     disk_status = _check_disk()
+    pool_status = _check_browser_pool()
 
-    statuses = [db_status, ai_status, pw_status, disk_status]
-    if all(s == "ok" for s in statuses):
-        overall = "ok"
-    elif db_status == "error":
+    critical_statuses = [db_status]
+    all_statuses = [db_status, ai_status, pw_status, disk_status, pool_status]
+
+    if db_status == "error":
         overall = "unhealthy"
+    elif all(s == "ok" or s.startswith("ok (") for s in all_statuses):
+        overall = "ok"
     else:
         overall = "degraded"
 

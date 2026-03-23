@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     SCAN_EXEC_CONCURRENCY: int = 2
     SCAN_TRACE_DIR: str = "/tmp/qapal_traces"
 
+    # --- Browser Pool ---
+    # Max concurrent Playwright browser contexts kept warm across scans.
+    # Each context uses ~200-400MB RAM. Size to (available RAM - 1GB) / 400MB.
+    # t3.medium (4GB): 4  |  t3.large (8GB): 8  |  t3.xlarge (16GB): 16
+    BROWSER_POOL_SIZE: int = 4
+    BROWSER_HEADLESS: bool = True
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

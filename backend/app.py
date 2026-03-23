@@ -44,12 +44,28 @@ logging.root.setLevel(logging.DEBUG if settings.DEBUG else logging.INFO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: create DB tables.  Shutdown: nothing yet."""
+    """Startup: create DB tables, warm browser pool.  Shutdown: drain pool."""
+    log = logging.getLogger("qapal.api")
+
+    # DB tables first — required before any request can be served
     create_tables()
-    logging.getLogger("qapal.api").info(
-        "QAPAL backend started (version=%s)", settings.APP_VERSION
-    )
+
+    # Warm the browser pool — kept alive for the life of the process
+    from backend.services.browser_pool import browser_pool
+    try:
+        await browser_pool.start()
+    except Exception as exc:
+        # Non-fatal at startup: quick scan and deep scan will degrade gracefully
+        log.error("BrowserPool startup failed (scans will be unavailable): %s", exc)
+
+    log.info("QAPAL backend started (version=%s, pool_size=%d)",
+             settings.APP_VERSION, settings.BROWSER_POOL_SIZE)
     yield
+
+    # Graceful shutdown: drain in-flight contexts, then close browser
+    log.info("QAPAL backend shutting down")
+    from backend.services.browser_pool import browser_pool
+    await browser_pool.stop()
 
 
 # ── App ──────────────────────────────────────────────────────────────────
