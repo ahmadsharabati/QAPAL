@@ -5,7 +5,7 @@ Every endpoint enforces ownership: a user can only access their own jobs.
 Quota, rate limits, and concurrent scan limits are checked before creation.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query, status
 from sqlalchemy.orm import Session
 
 from backend.database import get_db

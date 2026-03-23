@@ -15,6 +15,7 @@ from sqlalchemy.pool import StaticPool
 
 from backend.database import Base, get_db
 from backend.config import settings
+import backend.models  # noqa: ensure all ORM models register with Base.metadata before create_all
 
 # ── Test DB (in-memory SQLite with shared connection) ────────────────────
 
@@ -206,7 +207,9 @@ class TestQuota:
             headers=AUTH,
         )
         assert r.status_code == 403
-        assert "quota" in r.json()["detail"].lower()
+        detail = r.json()["detail"]
+        msg = detail["message"] if isinstance(detail, dict) else detail
+        assert "quota" in msg.lower()
 
     def test_quota_exceeded_includes_upgrade_hint(self, client):
         """Quota error message suggests upgrading."""
@@ -223,7 +226,11 @@ class TestQuota:
         )
         assert r.status_code == 403
         detail = r.json()["detail"]
-        assert "upgrade" in detail.lower() or "Upgrade" in detail
+        msg = detail["message"] if isinstance(detail, dict) else detail
+        assert "upgrade" in msg.lower()
+        # Structured error should also include an error code
+        if isinstance(detail, dict):
+            assert detail.get("error") == "QUOTA_EXCEEDED"
 
 
 # ============================================================================
