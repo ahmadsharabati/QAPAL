@@ -5,7 +5,7 @@ All config is centralized here. No magic strings in routers or services.
 """
 
 from pydantic_settings import BaseSettings
-from typing import List
+from typing import Optional, List
 
 
 class Settings(BaseSettings):

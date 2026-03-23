@@ -179,6 +179,7 @@ def _extract_issues(exec_results: list) -> list:
 
             counter += 1
             action = step.get("action", "unknown")
+            is_nav = action == "navigate"
             cat = step.get("category", "UNKNOWN")
             
             # ── Task 4.1 & 4.5: Mapping ───────────────────────────────

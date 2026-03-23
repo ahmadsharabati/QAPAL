@@ -589,6 +589,7 @@ class TestWorkerHelpers:
                 "status": "fail",
                 "steps": [
                     {"action": "navigate", "url": "https://x.com", "status": "pass"},
+                    # Phase 4: no category → falls back to INTERACTION_FAILURE/high
                     {"action": "click", "status": "fail", "reason": "Element not found"},
                 ],
                 "assertions": [],
@@ -599,9 +600,11 @@ class TestWorkerHelpers:
         assert len(issues) == 1
         assert issues[0]["severity"] == "high"
         assert issues[0]["rule"] == "INTERACTION_FAILURE"
-        assert "click failed" in issues[0]["message"]
+        # Phase 4 message format: "[TC001] UNKNOWN: <reason>"
+        assert "Element not found" in issues[0]["message"]
 
     def test_extract_issues_navigation_failure(self):
+        """Phase 4: navigation timeouts use category=NAV_TIMEOUT → PAGE_LOAD_ERROR/critical."""
         from backend.worker import _extract_issues
 
         exec_results = [
@@ -609,7 +612,13 @@ class TestWorkerHelpers:
                 "id": "TC002",
                 "status": "fail",
                 "steps": [
-                    {"action": "navigate", "url": "https://x.com", "status": "fail", "reason": "Timeout"},
+                    {
+                        "action": "navigate",
+                        "url": "https://x.com",
+                        "status": "fail",
+                        "reason": "Timeout",
+                        "category": "NAV_TIMEOUT",  # Phase 4 executor sets this
+                    },
                 ],
                 "assertions": [],
                 "passive_errors": {},
@@ -618,7 +627,7 @@ class TestWorkerHelpers:
         issues = _extract_issues(exec_results)
         assert len(issues) == 1
         assert issues[0]["severity"] == "critical"
-        assert issues[0]["rule"] == "NAVIGATION_FAILURE"
+        assert issues[0]["rule"] == "PAGE_LOAD_ERROR"
 
     def test_extract_issues_assertion_failure(self):
         from backend.worker import _extract_issues
@@ -637,7 +646,8 @@ class TestWorkerHelpers:
         issues = _extract_issues(exec_results)
         assert len(issues) == 1
         assert issues[0]["severity"] == "critical"
-        assert issues[0]["rule"] == "URL_ASSERTION_FAILED"
+        # Phase 4: unified rule name for all assertion failures
+        assert issues[0]["rule"] == "ASSERTION_ERROR"
 
     def test_extract_issues_passive_errors(self):
         from backend.worker import _extract_issues
@@ -737,7 +747,14 @@ class TestWorkerHelpers:
                     "id": "TC001",
                     "status": "fail",
                     "steps": [
-                        {"action": "navigate", "url": "https://example.com", "status": "fail", "reason": "Timeout"},
+                        # Phase 4: NAV_TIMEOUT category → PAGE_LOAD_ERROR/critical
+                        {
+                            "action": "navigate",
+                            "url": "https://example.com",
+                            "status": "fail",
+                            "reason": "Timeout",
+                            "category": "NAV_TIMEOUT",
+                        },
                     ],
                     "assertions": [],
                     "passive_errors": {},

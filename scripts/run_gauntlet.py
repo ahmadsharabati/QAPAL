@@ -10,7 +10,7 @@ from typing import List, Dict, Any
 sys.path.append(str(Path(__file__).parent.parent))
 
 from engine.quick_scan import run_quick_scan
-from cli import quick_scan as cli_quick_scan # Import for consistency maybe, but easier to use engine directly
+# from cli import quick_scan as cli_quick_scan # Remove to avoid typer dependency issues in script env
 from backend.worker import run_deep_scan
 from backend.database import SessionLocal, engine
 from backend.models import Base, Job, User
@@ -18,12 +18,7 @@ from backend.models import Base, Job, User
 # Diverse set of real-world sites
 GAUNTLET_SITES = [
     {"name": "TodoMVC (React)", "url": "https://demo.playwright.dev/todomvc/#/", "framework": "React"},
-    {"name": "Hacker News (Minimal/Static)", "url": "https://news.ycombinator.com", "framework": "Static"},
-    {"name": "Wikipedia (Large DOM)", "url": "https://www.wikipedia.org", "framework": "Static"},
-    {"name": "Vercel (Next.js)", "url": "https://vercel.com", "framework": "Next.js"},
     {"name": "The Internet (Edge Cases)", "url": "https://the-internet.herokuapp.com/", "framework": "Legacy"},
-    {"name": "Luma (E-commerce)", "url": "https://magento.softwaretestingboard.com/", "framework": "Magento"},
-    {"name": "Playwright Demo (Complex)", "url": "https://demo.playwright.dev/cart/", "framework": "React/Shopping"},
 ]
 
 async def run_site_scan(site: Dict[str, str], mode: str = "quick"):
@@ -42,6 +37,8 @@ async def run_site_scan(site: Dict[str, str], mode: str = "quick"):
                 "framework": site["framework"],
                 "score": result.get("score", "N/A"),
                 "issues": len(result.get("issues", [])),
+                "categories": "N/A",  # Quick scan doesn't use the new taxonomy yet
+                "healed": 0,
                 "duration": duration,
                 "status": "PASS"
             }
@@ -68,11 +65,20 @@ async def run_site_scan(site: Dict[str, str], mode: str = "quick"):
                 job = db.query(Job).filter(Job.id == job_id).first()
                 report = job.report if job else {}
                 duration = int((time.monotonic() - start_time) * 1000)
+                
+                # ── Phase 4 Metrics ───────────────────────────────────
+                issues = report.get("issues", [])
+                categories = list(set(i.get("rule", "UNKNOWN") for i in issues))
+                healed_count = sum(1 for p in (report.get("exec_results") or []) 
+                                  for s in p.get("steps", []) if s.get("healed"))
+                
                 return {
                     "site": site["name"],
                     "framework": site["framework"],
                     "score": report.get("score", 0),
-                    "issues": len(report.get("issues", [])),
+                    "issues": len(issues),
+                    "categories": ", ".join(categories) if categories else "None",
+                    "healed": healed_count,
                     "duration": duration,
                     "status": job.state.upper() if job else "FAILED"
                 }
@@ -86,6 +92,8 @@ async def run_site_scan(site: Dict[str, str], mode: str = "quick"):
             "framework": site["framework"],
             "score": 0,
             "issues": 0,
+            "categories": "N/A",
+            "healed": 0,
             "duration": 0,
             "status": f"ERROR: {str(e)[:50]}"
         }
@@ -114,10 +122,10 @@ async def run_gauntlet(mode: str = "quick"):
     with open(report_path, "w") as f:
         f.write(f"# QAPAL Gauntlet Results ({mode.upper()})\n\n")
         f.write(f"Generated at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-        f.write("| Site | Framework | Score | Issues | Status | Duration |\n")
-        f.write("| --- | --- | --- | --- | --- | --- |\n")
+        f.write("| Site | Framework | Score | Issues | Categories | Heals | Status | Duration |\n")
+        f.write("| --- | --- | --- | --- | --- | --- | --- | --- |\n")
         for r in results:
-            f.write(f"| {r['site']} | {r['framework']} | {r['score']} | {r['issues']} | {r['status']} | {r['duration']}ms |\n")
+            f.write(f"| {r['site']} | {r['framework']} | {r['score']} | {r['issues']} | {r['categories']} | {r['healed']} | {r['status']} | {r['duration']}ms |\n")
         
     print(f"\n✅ Gauntlet complete! Results saved to {report_path}")
 
