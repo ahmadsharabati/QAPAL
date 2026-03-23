@@ -1030,3 +1030,285 @@ class TestSlidingWindowLimiter:
         _, headers = limiter.is_allowed("key1", max_requests=10, window_seconds=60)
         assert headers["X-RateLimit-Limit"] == "10"
         assert "X-RateLimit-Remaining" in headers
+
+
+# ============================================================================
+# Codegen — Pure Unit Tests (no Playwright, no network)
+# ============================================================================
+
+class TestCodegen:
+    """Tests for codegen.py — plan-to-pytest-file translation."""
+
+    # ── _escape ──────────────────────────────────────────────────────────
+
+    def test_escape_backslash(self):
+        from codegen import _escape
+        assert _escape("a\\b") == "a\\\\b"
+
+    def test_escape_double_quote(self):
+        from codegen import _escape
+        assert _escape('say "hi"') == 'say \\"hi\\"'
+
+    def test_escape_newline(self):
+        from codegen import _escape
+        assert _escape("line1\nline2") == "line1\\nline2"
+
+    def test_escape_tab(self):
+        from codegen import _escape
+        assert _escape("col1\tcol2") == "col1\\tcol2"
+
+    def test_escape_carriage_return(self):
+        from codegen import _escape
+        assert _escape("win\r\nline") == "win\\r\\nline"
+
+    # ── _selector_to_code ────────────────────────────────────────────────
+
+    def test_selector_testid(self):
+        from codegen import _selector_to_code
+        sel = {"strategy": "testid", "value": "login-btn"}
+        assert _selector_to_code(sel) == 'page.get_by_test_id("login-btn")'
+
+    def test_selector_role_with_name(self):
+        from codegen import _selector_to_code
+        sel = {"strategy": "role", "value": {"role": "button", "name": "Submit"}}
+        assert _selector_to_code(sel) == 'page.get_by_role("button", name="Submit")'
+
+    def test_selector_role_without_name(self):
+        from codegen import _selector_to_code
+        sel = {"strategy": "role", "value": {"role": "heading"}}
+        assert _selector_to_code(sel) == 'page.get_by_role("heading")'
+
+    def test_selector_text(self):
+        from codegen import _selector_to_code
+        sel = {"strategy": "text", "value": "Sign in"}
+        assert _selector_to_code(sel) == 'page.get_by_text("Sign in")'
+
+    def test_selector_label(self):
+        from codegen import _selector_to_code
+        sel = {"strategy": "label", "value": "Email address"}
+        assert _selector_to_code(sel) == 'page.get_by_label("Email address")'
+
+    def test_selector_placeholder(self):
+        from codegen import _selector_to_code
+        sel = {"strategy": "placeholder", "value": "Enter email"}
+        assert _selector_to_code(sel) == 'page.get_by_placeholder("Enter email")'
+
+    def test_selector_css(self):
+        from codegen import _selector_to_code
+        sel = {"strategy": "css", "value": ".btn-primary"}
+        assert _selector_to_code(sel) == 'page.locator(".btn-primary")'
+
+    def test_selector_testid_prefix(self):
+        from codegen import _selector_to_code
+        sel = {"strategy": "testid_prefix", "value": "product-card", "index": 2}
+        assert _selector_to_code(sel) == 'page.locator(\'[data-testid^="product-card"]\').nth(2)'
+
+    # ── _action_to_code ──────────────────────────────────────────────────
+
+    def test_action_navigate(self):
+        from codegen import _action_to_code
+        step = {"action": "navigate", "url": "https://example.com/login"}
+        lines = _action_to_code(step)
+        assert lines == ['page.goto("https://example.com/login", wait_until="domcontentloaded")']
+
+    def test_action_click(self):
+        from codegen import _action_to_code
+        step = {"action": "click", "selector": {"strategy": "testid", "value": "submit"}}
+        lines = _action_to_code(step)
+        assert lines == ['page.get_by_test_id("submit").click()']
+
+    def test_action_fill(self):
+        from codegen import _action_to_code
+        step = {"action": "fill", "selector": {"strategy": "label", "value": "Email"}, "value": "user@test.com"}
+        lines = _action_to_code(step)
+        assert lines == ['page.get_by_label("Email").fill("user@test.com")']
+
+    def test_action_select(self):
+        from codegen import _action_to_code
+        step = {"action": "select", "selector": {"strategy": "label", "value": "Country"},
+                "label": "Germany"}
+        lines = _action_to_code(step)
+        assert lines == ['page.get_by_label("Country").select_option(label="Germany")']
+
+    def test_action_press(self):
+        from codegen import _action_to_code
+        step = {"action": "press", "selector": {"strategy": "testid", "value": "search"},
+                "key": "Enter"}
+        lines = _action_to_code(step)
+        assert lines == ['page.get_by_test_id("search").press("Enter")']
+
+    def test_action_missing_selector_warns(self):
+        from codegen import _action_to_code
+        step = {"action": "click"}  # no selector
+        lines = _action_to_code(step)
+        assert len(lines) == 1
+        assert "WARNING" in lines[0]
+        assert "missing selector" in lines[0]
+
+    def test_action_unknown_warns(self):
+        from codegen import _action_to_code
+        step = {"action": "teleport", "selector": {"strategy": "testid", "value": "x"}}
+        lines = _action_to_code(step)
+        assert "WARNING" in lines[0]
+
+    # ── _assertion_to_code ───────────────────────────────────────────────
+
+    def test_assertion_url_equals(self):
+        from codegen import _assertion_to_code
+        a = {"type": "url_equals", "value": "https://example.com/dashboard"}
+        lines = _assertion_to_code(a)
+        assert lines == ['expect(page).to_have_url("https://example.com/dashboard")']
+
+    def test_assertion_url_contains(self):
+        from codegen import _assertion_to_code
+        a = {"type": "url_contains", "value": "/dashboard"}
+        lines = _assertion_to_code(a)
+        assert len(lines) == 1
+        assert "re.compile" in lines[0]
+        assert "/dashboard" in lines[0]
+
+    def test_assertion_element_visible(self):
+        from codegen import _assertion_to_code
+        a = {"type": "element_visible",
+             "selector": {"strategy": "testid", "value": "welcome-msg"}}
+        lines = _assertion_to_code(a)
+        assert lines == ['expect(page.get_by_test_id("welcome-msg")).to_be_visible()']
+
+    def test_assertion_element_text_equals(self):
+        from codegen import _assertion_to_code
+        a = {"type": "element_text_equals",
+             "selector": {"strategy": "testid", "value": "title"},
+             "value": "Hello World"}
+        lines = _assertion_to_code(a)
+        assert lines == ['expect(page.get_by_test_id("title")).to_have_text("Hello World")']
+
+    def test_assertion_element_count(self):
+        from codegen import _assertion_to_code
+        a = {"type": "element_count",
+             "selector": {"strategy": "css", "value": ".item"},
+             "value": 5}
+        lines = _assertion_to_code(a)
+        assert lines == ['expect(page.locator(".item")).to_have_count(5)']
+
+    def test_assertion_missing_selector_warns(self):
+        from codegen import _assertion_to_code
+        a = {"type": "element_visible"}  # no selector
+        lines = _assertion_to_code(a)
+        assert "WARNING" in lines[0]
+
+    # ── generate_test_file ───────────────────────────────────────────────
+
+    def test_generate_test_file_compiles(self):
+        """Generated code must be valid Python."""
+        from codegen import generate_test_file
+        plan = {
+            "test_id": "TC001_login",
+            "name": "User can log in",
+            "steps": [
+                {"action": "navigate", "url": "https://example.com/login"},
+                {"action": "fill", "selector": {"strategy": "label", "value": "Email"},
+                 "value": "user@test.com"},
+                {"action": "click", "selector": {"strategy": "testid", "value": "submit"}},
+            ],
+            "assertions": [
+                {"type": "url_contains", "value": "/dashboard"},
+                {"type": "element_visible",
+                 "selector": {"strategy": "testid", "value": "welcome"}},
+            ],
+        }
+        code = generate_test_file(plan)
+        compile(code, "<test>", "exec")  # raises SyntaxError if invalid
+
+    def test_generate_test_file_function_name(self):
+        """test_id becomes the function name."""
+        from codegen import generate_test_file
+        plan = {"test_id": "TC002_checkout", "name": "Checkout flow", "steps": [], "assertions": []}
+        code = generate_test_file(plan)
+        assert "def test_tc002_checkout(page: Page):" in code
+
+    def test_generate_test_file_has_header(self):
+        """Generated file has the pytest-playwright import header."""
+        from codegen import generate_test_file
+        plan = {"test_id": "TC003", "name": "Smoke", "steps": [], "assertions": []}
+        code = generate_test_file(plan)
+        assert "from playwright.sync_api import Page, expect" in code
+
+    def test_generate_test_file_empty_plan(self):
+        """Empty plan produces a pass-only function."""
+        from codegen import generate_test_file
+        plan = {"test_id": "TC004_empty", "name": "Empty", "steps": [], "assertions": []}
+        code = generate_test_file(plan)
+        assert "pass" in code
+        compile(code, "<test>", "exec")
+
+    def test_generate_test_file_multi_single_header(self):
+        """Multi-plan file has exactly one import header."""
+        from codegen import generate_test_file_multi
+        plans = [
+            {"test_id": "TC005_a", "name": "A", "steps": [], "assertions": []},
+            {"test_id": "TC005_b", "name": "B", "steps": [], "assertions": []},
+        ]
+        code = generate_test_file_multi(plans)
+        assert code.count("from playwright.sync_api import") == 1
+        assert "def test_tc005_a" in code
+        assert "def test_tc005_b" in code
+        compile(code, "<test>", "exec")
+
+    def test_generate_test_file_special_chars_in_value(self):
+        """Values with special chars produce valid string literals."""
+        from codegen import generate_test_file
+        plan = {
+            "test_id": "TC006_special",
+            "name": 'Test with "quotes" and newlines',
+            "steps": [
+                {"action": "fill",
+                 "selector": {"strategy": "label", "value": 'Name "Field"'},
+                 "value": "line1\nline2"},
+            ],
+            "assertions": [],
+        }
+        code = generate_test_file(plan)
+        compile(code, "<test>", "exec")  # must not produce a SyntaxError
+
+
+# ── Job model generated_test property ────────────────────────────────────
+
+class TestJobGeneratedTest:
+    def test_generated_test_hoisted_from_report(self, client):
+        """generated_test field in report is exposed at top level of JobResponse."""
+        from backend.models import Job
+
+        db = _TestSession()
+        job = Job(
+            user_id="u1",
+            url="https://example.com",
+            state="queued",
+            progress=0,
+            report={
+                "summary": "test",
+                "score": 100,
+                "issues": [],
+                "generated_test": "def test_example(page):\n    pass\n",
+            },
+        )
+        db.add(job)
+        db.commit()
+        job_id = job.id
+        db.close()
+
+        db = _TestSession()
+        j = db.query(Job).filter(Job.id == job_id).first()
+        assert j.generated_test == "def test_example(page):\n    pass\n"
+        db.close()
+
+    def test_generated_test_none_when_absent(self):
+        """generated_test is None when report has no generated_test key."""
+        from backend.models import Job
+        j = Job(user_id="u1", url="https://x.com", state="queued", progress=0, report={})
+        assert j.generated_test is None
+
+    def test_generated_test_none_when_no_report(self):
+        """generated_test is None when report is None."""
+        from backend.models import Job
+        j = Job(user_id="u1", url="https://x.com", state="queued", progress=0, report=None)
+        assert j.generated_test is None

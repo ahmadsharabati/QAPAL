@@ -72,6 +72,10 @@ class JobResponse(BaseModel):
     error: Optional[str] = None
     failure_stage: Optional[str] = None
     trace_path: Optional[str] = None
+    # generated_test lives inside report["generated_test"] — exposed as a
+    # top-level convenience field so the extension can access it directly
+    # without parsing the full report blob.
+    generated_test: Optional[str] = None
     created_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None

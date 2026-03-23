@@ -521,6 +521,16 @@ async def run_deep_scan(job_id: str) -> None:
         duration_ms = int((time.monotonic() - start_time) * 1000)
         report = _build_report(url, crawl_results, exec_results, duration_ms, credentials=credentials)
 
+        # ── 6b. Codegen — attach runnable pytest file to report ───────
+        try:
+            from codegen import generate_test_file_multi
+            generated_test = generate_test_file_multi(valid_plans)
+            report["generated_test"] = generated_test
+            log.info("Codegen: %d chars of pytest code generated", len(generated_test))
+        except Exception as cg_err:
+            log.warning("Codegen failed (non-fatal): %s", cg_err)
+            report["generated_test"] = None
+
         # ── 7. Narration (95→100%) ────────────────────────────────────
         _update_job(job_id, log=log, progress=95, message="Generating summary...")
         try:

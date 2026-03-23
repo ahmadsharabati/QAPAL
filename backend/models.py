@@ -12,6 +12,7 @@ Job state machine (allowed transitions):
 
 import uuid
 from datetime import datetime, timezone, date
+from typing import Optional
 
 from sqlalchemy import (
     Column, String, Integer, Float, Text, DateTime, Date, JSON, Boolean,
@@ -104,6 +105,11 @@ class Job(Base):
 
     # Relationships
     user = relationship("User", back_populates="jobs")
+
+    @property
+    def generated_test(self) -> Optional[str]:
+        """Hoist generated_test out of the report JSON for direct API access."""
+        return (self.report or {}).get("generated_test")
 
     def transition(self, target: str) -> bool:
         """

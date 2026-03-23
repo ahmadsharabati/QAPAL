@@ -720,6 +720,51 @@ async def cmd_compile(args):
     return 0
 
 
+# ── Codegen command ───────────────────────────────────────────────────
+
+async def cmd_codegen(args):
+    """
+    Convert QAPAL JSON plan(s) into standalone pytest-playwright .py files.
+
+    Examples:
+      python main.py codegen --plan plans/TC001_login.json
+      python main.py codegen --plans plans/TC*.json --output tests/generated/
+    """
+    from codegen import codegen_plan_file, codegen_plans
+    import glob as _glob
+
+    output_dir = args.output or "tests/generated"
+
+    # Collect target plan files
+    plan_files: List[str] = []
+    if getattr(args, "plan", None):
+        plan_files = [args.plan]
+    elif getattr(args, "plans", None):
+        for pattern in args.plans:
+            plan_files.extend(_glob.glob(pattern))
+        plan_files = sorted(set(plan_files))
+
+    if not plan_files:
+        log.error("No plan files specified. Use --plan FILE or --plans GLOB")
+        return 1
+
+    log.info("\n [codegen] Converting %d plan(s) → %s/", len(plan_files), output_dir)
+    t0 = time.monotonic()
+
+    if len(plan_files) == 1:
+        out = codegen_plan_file(plan_files[0], output_dir)
+        log.info("   ✓ %s", out)
+    else:
+        outs = codegen_plans(plan_files, output_dir)
+        for o in outs:
+            log.info("   ✓ %s", o)
+
+    duration = int((time.monotonic() - t0) * 1000)
+    log.info("   %d file(s) written in %dms", len(plan_files), duration)
+    log.info("\n Run with:  pytest %s/ -v", output_dir)
+    return 0
+
+
 # ── Graph-crawl command ───────────────────────────────────────────────
 
 async def cmd_graph_crawl(args):
@@ -1157,6 +1202,13 @@ def main():
                    help="Run N tests concurrently (default: 1 = sequential)")
 
     # compile
+    p = sub.add_parser("codegen", help="Convert QAPAL JSON plan(s) to standalone pytest-playwright .py files")
+    _cg = p.add_mutually_exclusive_group(required=True)
+    _cg.add_argument("--plan",  metavar="FILE",  help="Single plan JSON file to convert")
+    _cg.add_argument("--plans", metavar="GLOB", nargs="+", help="One or more plan JSON files / globs")
+    p.add_argument("--output", "-o", metavar="DIR", default="tests/generated",
+                   help="Output directory (default: tests/generated/)")
+
     p = sub.add_parser("compile", help="Compile locator DB into a compact compiled_model.json")
     p.add_argument("--output", "-o", default="compiled_model.json",
                    help="Output path (default: compiled_model.json)")
@@ -1232,6 +1284,8 @@ def main():
             return asyncio.run(cmd_graph(args))
         elif args.cmd == "graph-crawl":
             return asyncio.run(cmd_graph_crawl(args))
+        elif args.cmd == "codegen":
+            return asyncio.run(cmd_codegen(args))
         elif args.cmd == "compile":
             return asyncio.run(cmd_compile(args))
         elif args.cmd == "explore":
