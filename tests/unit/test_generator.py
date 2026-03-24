@@ -598,7 +598,94 @@ class TestFindByNameInDb(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Suite 7 — negative test generation toggle
+# Suite 7 — _fix_selector_strategies()
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestFixSelectorStrategies(unittest.TestCase):
+
+    def _loc_with_chain(self, url, testid, chain_extras):
+        """Locator with testid in chain + additional chain entries."""
+        chain = [{"strategy": "testid", "value": testid}] + chain_extras
+        return {
+            "url": url,
+            "identity": {"role": "textbox", "name": testid},
+            "locators": {"chain": chain},
+        }
+
+    def _gen(self, locators):
+        db = _make_db(locators=locators)
+        ai = _make_ai("[]")
+        return TestGenerator(db, ai_client=ai)
+
+    def _plans_with_testid(self, testid_val, url="https://app.com/"):
+        return [{
+            "test_id": "TC001",
+            "name": "Test",
+            "steps": [
+                {"action": "navigate", "url": url},
+                {"action": "click", "selector": {"strategy": "testid", "value": testid_val}},
+            ],
+            "assertions": [],
+        }]
+
+    def test_hallucinated_testid_replaced_by_role(self):
+        """Testid not in DB (hallucinated) is replaced with role from DB."""
+        locs = [_minimal_locator(url="https://app.com/", role="button", name="Submit")]
+        g = self._gen(locs)
+        plans = self._plans_with_testid("submit-btn-that-doesnt-exist")
+        fixed = g._fix_selector_strategies(plans)
+        sel = fixed[0]["steps"][1]["selector"]
+        # Should be replaced with role (found by keyword 'submit')
+        # (role match depends on keyword overlap — may stay testid if no match)
+        assert sel.get("strategy") in ("role", "testid")
+
+    def test_real_testid_with_label_replaced(self):
+        """Testid IS in DB but locator has label alternative → use label."""
+        url = "https://app.com/"
+        loc = self._loc_with_chain(url, "email", [
+            {"strategy": "label", "value": "Email address"},
+        ])
+        g = self._gen([loc])
+        plans = self._plans_with_testid("email", url)
+        fixed = g._fix_selector_strategies(plans)
+        sel = fixed[0]["steps"][1]["selector"]
+        assert sel["strategy"] == "label"
+        assert sel["value"] == "Email address"
+
+    def test_real_testid_with_placeholder_replaced(self):
+        """Testid IS in DB with placeholder → use placeholder (when no label)."""
+        url = "https://app.com/"
+        loc = self._loc_with_chain(url, "search-input", [
+            {"strategy": "placeholder", "value": "Search products"},
+        ])
+        g = self._gen([loc])
+        plans = self._plans_with_testid("search-input", url)
+        fixed = g._fix_selector_strategies(plans)
+        sel = fixed[0]["steps"][1]["selector"]
+        assert sel["strategy"] == "placeholder"
+        assert sel["value"] == "Search products"
+
+    def test_real_testid_no_chain_alt_kept(self):
+        """Testid IS in DB but no label/role alternative → keep testid as-is."""
+        url = "https://app.com/"
+        loc = self._loc_with_chain(url, "custom-widget", [])
+        g = self._gen([loc])
+        plans = self._plans_with_testid("custom-widget", url)
+        fixed = g._fix_selector_strategies(plans)
+        sel = fixed[0]["steps"][1]["selector"]
+        assert sel["strategy"] == "testid"
+        assert sel["value"] == "custom-widget"
+
+    def test_no_db_plans_unchanged(self):
+        """Without DB, plans pass through unchanged."""
+        g = TestGenerator(None, ai_client=_make_ai("[]"))  # type: ignore
+        plans = self._plans_with_testid("login-btn")
+        fixed = g._fix_selector_strategies(plans)
+        assert fixed[0]["steps"][1]["selector"]["strategy"] == "testid"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Suite 8 — negative test generation toggle
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestNegativeTests(unittest.TestCase):

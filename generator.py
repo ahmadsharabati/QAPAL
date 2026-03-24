@@ -829,31 +829,31 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
 
     def _fix_selector_strategies(self, plans: list) -> list:
         """
-        Post-processor: replace `testid` / `testid_prefix` selectors on sites that
-        have no data-testid attributes in the locator DB.
+        Post-processor: replace `testid` / `testid_prefix` selectors with stable
+        role/label/placeholder alternatives when available in the locator DB chain.
 
-        On plain-HTML sites (e.g. books.toscrape.com) the AI hallucinates testid
-        selectors because the locator prompt doesn't clearly signal that testid is
-        absent. This post-processor detects the absence globally and replaces every
-        testid-strategy selector with the best matching `role` selector from the DB.
+        Two cases handled:
+          1. Hallucinated testid: not in DB at all → replace via keyword search
+          2. Real testid with stable alternative: in DB but the same locator has
+             a label/placeholder/role chain entry → prefer semantic selector over testid
+             (handles Angular/React apps where data-testid is only set after JS bootstrap)
         """
         if not self._db:
             return plans
 
-        # Build the set of testid values that actually exist in the locator DB.
+        # Build the set of testid values that actually exist in the locator DB,
+        # and a map from testid value → locator entry (for chain inspection).
         known_testids: set = set()
         known_prefixes: set = set()
+        testid_to_loc: dict = {}   # testid_value → first locator entry with that testid
         for loc in self._db._locs.all():
             for c in loc.get("locators", {}).get("chain", []):
                 if c.get("strategy") == "testid":
-                    known_testids.add(c.get("value", ""))
+                    val = c.get("value", "")
+                    known_testids.add(val)
+                    testid_to_loc.setdefault(val, loc)
                 elif c.get("strategy") == "testid_prefix":
                     known_prefixes.add(c.get("value", ""))
-
-        # If the site has no testids at all, replace every testid selector with role.
-        # If the site has some testids, only replace ones that aren't in the DB
-        # (hallucinated by the model).
-        has_testid = bool(known_testids or known_prefixes)
 
         def _is_hallucinated(sel: dict) -> bool:
             strategy = sel.get("strategy", "")
@@ -864,6 +864,37 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
                 return str(value) not in known_prefixes
             return False
 
+        def _stable_alternative(sel: dict) -> Optional[dict]:
+            """
+            For a testid that IS in the DB, return the best stable alternative
+            from the same locator's chain (label > placeholder > role).
+            Returns None if no stable alternative exists (keep testid as-is).
+            """
+            if sel.get("strategy") != "testid":
+                return None
+            value = str(sel.get("value", ""))
+            loc = testid_to_loc.get(value)
+            if not loc:
+                return None
+            chain = loc.get("locators", {}).get("chain", [])
+            for c in chain:
+                if c.get("strategy") == "label" and c.get("value"):
+                    return {"strategy": "label", "value": c["value"], "_auto_fixed": True}
+            for c in chain:
+                if c.get("strategy") == "placeholder" and c.get("value"):
+                    return {"strategy": "placeholder", "value": c["value"], "_auto_fixed": True}
+            for c in chain:
+                if c.get("strategy") in ("role", "role_container") and c.get("name"):
+                    return {"strategy": "role",
+                            "value": {"role": c.get("value", ""), "name": c["name"]},
+                            "_auto_fixed": True}
+            return None
+
+        def _get_replacement(sel: dict, url: str) -> Optional[dict]:
+            if _is_hallucinated(sel):
+                return self._find_best_role_selector(sel, url)
+            return _stable_alternative(sel)
+
         for plan in plans:
             steps = plan.get("steps", [])
             curr_url = ""
@@ -871,8 +902,8 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
                 if step.get("action") == "navigate":
                     curr_url = step.get("url", curr_url)
                 sel = step.get("selector") or {}
-                if sel.get("strategy") in ("testid", "testid_prefix") and _is_hallucinated(sel):
-                    replacement = self._find_best_role_selector(sel, curr_url)
+                if sel.get("strategy") in ("testid", "testid_prefix"):
+                    replacement = _get_replacement(sel, curr_url)
                     if replacement:
                         step["selector"] = replacement
 
@@ -882,8 +913,8 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
                     last_url = s.get("url", last_url)
             for assertion in plan.get("assertions", []):
                 sel = assertion.get("selector") or {}
-                if sel and sel.get("strategy") in ("testid", "testid_prefix") and _is_hallucinated(sel):
-                    replacement = self._find_best_role_selector(sel, last_url)
+                if sel and sel.get("strategy") in ("testid", "testid_prefix"):
+                    replacement = _get_replacement(sel, last_url)
                     if replacement:
                         assertion["selector"] = replacement
 
