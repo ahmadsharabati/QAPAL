@@ -840,36 +840,49 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
         if not self._db:
             return plans
 
-        # Check whether any crawled locator on this site has a testid chain entry.
-        # If even one exists, the AI's testid usage is intentional — leave plans alone.
-        has_testid = any(
-            any(c.get("strategy") == "testid" for c in loc.get("locators", {}).get("chain", []))
-            for loc in self._db._locs.all()
-        )
-        if has_testid:
-            return plans
+        # Build the set of testid values that actually exist in the locator DB.
+        known_testids: set = set()
+        known_prefixes: set = set()
+        for loc in self._db._locs.all():
+            for c in loc.get("locators", {}).get("chain", []):
+                if c.get("strategy") == "testid":
+                    known_testids.add(c.get("value", ""))
+                elif c.get("strategy") == "testid_prefix":
+                    known_prefixes.add(c.get("value", ""))
+
+        # If the site has no testids at all, replace every testid selector with role.
+        # If the site has some testids, only replace ones that aren't in the DB
+        # (hallucinated by the model).
+        has_testid = bool(known_testids or known_prefixes)
+
+        def _is_hallucinated(sel: dict) -> bool:
+            strategy = sel.get("strategy", "")
+            value = sel.get("value", "")
+            if strategy == "testid":
+                return str(value) not in known_testids
+            if strategy == "testid_prefix":
+                return str(value) not in known_prefixes
+            return False
 
         for plan in plans:
             steps = plan.get("steps", [])
-            # Fix step selectors, tracking current URL context
             curr_url = ""
             for step in steps:
                 if step.get("action") == "navigate":
                     curr_url = step.get("url", curr_url)
                 sel = step.get("selector") or {}
-                if sel.get("strategy") in ("testid", "testid_prefix"):
+                if sel.get("strategy") in ("testid", "testid_prefix") and _is_hallucinated(sel):
                     replacement = self._find_best_role_selector(sel, curr_url)
                     if replacement:
                         step["selector"] = replacement
 
-            # Fix assertion selectors (use last navigate URL)
             last_url = ""
             for s in steps:
                 if s.get("action") == "navigate":
                     last_url = s.get("url", last_url)
             for assertion in plan.get("assertions", []):
                 sel = assertion.get("selector") or {}
-                if sel and sel.get("strategy") in ("testid", "testid_prefix"):
+                if sel and sel.get("strategy") in ("testid", "testid_prefix") and _is_hallucinated(sel):
                     replacement = self._find_best_role_selector(sel, last_url)
                     if replacement:
                         assertion["selector"] = replacement

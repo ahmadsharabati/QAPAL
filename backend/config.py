@@ -43,10 +43,10 @@ class Settings(BaseSettings):
     QAPAL_TEST_PASS: Optional[str] = None
 
     # --- Scan (Deep Scan engine) ---
-    SCAN_TIMEOUT_SECONDS: int = 300
+    SCAN_TIMEOUT_SECONDS: int = 480
     SCAN_MAX_DEPTH: int = 2
     SCAN_MAX_PAGES_DEFAULT: int = 3
-    SCAN_NUM_TESTS: int = 3
+    SCAN_NUM_TESTS: int = 8
     SCAN_EXEC_CONCURRENCY: int = 2
     SCAN_TRACE_DIR: str = "/tmp/qapal_traces"
 

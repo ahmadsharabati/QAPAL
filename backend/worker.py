@@ -72,16 +72,191 @@ def _get_job_info(job_id: str) -> tuple:
 
 # ── Auto-PRD generation ─────────────────────────────────────────────────
 
+_PRD_SYNTHESIS_SYSTEM = """\
+You are a senior QA engineer. Your job is to read raw crawl data from a website
+(page inventory, form fields, navigation flows, button labels) and write a
+professional Product Requirements Document (PRD) that describes the site's key
+user flows for test automation.
 
-def _build_auto_prd(locator_db, url: str, crawl_results: list) -> str:
+OUTPUT FORMAT — plain Markdown, no fences:
+
+# <Site Name> Test Plan
+
+## Site Purpose
+One sentence describing what this site does.
+
+## User Flows
+
+### TC1: <Goal-oriented name, e.g. "User can log in">
+**Preconditions:** <what must be true before this test — e.g. "fresh browser, not logged in">
+**Steps:**
+1. Navigate to <url>
+2. <Action on element>
+3. ...
+**Expected Outcomes:**
+- URL changes to <path>
+- <Visible text or element that confirms success>
+
+... (one section per flow)
+
+RULES:
+- Write 6–10 test cases covering real business value (not just "page loads")
+- Every test must be self-contained: include login steps before auth-required flows
+- For multi-step flows (cart → checkout → payment), describe ALL steps in order
+- Expected outcomes must be specific: URL pattern OR visible element, not generic
+- If you see login/register forms: write auth tests first (they unlock other flows)
+- If you see a cart/checkout flow: trace it fully — add item → cart → checkout → confirm
+- If you see search: test search → results → item click
+- Never invent pages or buttons not present in the crawl data
+"""
+
+_PRD_SYNTHESIS_PROMPT = """\
+## Site URL
+{url}
+
+## Pages Discovered ({page_count} pages)
+{page_inventory}
+
+## Navigation Flows (observed click → URL transitions)
+{nav_flows}
+
+## Interactive Elements Per Page
+{elements_per_page}
+"""
+
+
+def _build_site_inventory(locator_db, crawl_results: list) -> tuple[str, str, str]:
     """
-    Synthesize a smoke-test PRD from crawl results.
+    Build three text blocks for the PRD synthesis prompt:
+      - page_inventory:    list of pages with element counts
+      - nav_flows:         page transition descriptions
+      - elements_per_page: forms/buttons/links per page
+    Returns (page_inventory, nav_flows, elements_per_page).
+    """
+    crawled_urls = [r["url"] for r in crawl_results if r.get("crawled")]
+    all_locs = locator_db.get_all_locators(valid_only=True)
 
-    Inspects discovered locators to build test cases for:
-    - Page loads and title
-    - Navigation links (if found)
-    - Forms (if found)
-    - Buttons/interactive elements (fallback)
+    # Group locators by page
+    by_url: dict = {}
+    for loc in all_locs:
+        u = loc.get("url", "")
+        if u:
+            by_url.setdefault(u, []).append(loc)
+
+    # Page inventory
+    inv_lines = []
+    for u in crawled_urls[:15]:
+        locs = by_url.get(u, [])
+        roles = {l.get("identity", {}).get("role", "") for l in locs}
+        has_form   = bool(roles & {"textbox", "combobox", "searchbox", "checkbox"})
+        has_nav    = bool(roles & {"link"})
+        has_btn    = bool(roles & {"button"})
+        tags = []
+        if has_form: tags.append("form")
+        if has_nav:  tags.append("nav")
+        if has_btn:  tags.append("buttons")
+        inv_lines.append(f"- {u}  [{', '.join(tags) or 'static'}]  ({len(locs)} elements)")
+    page_inventory = "\n".join(inv_lines) or "(none)"
+
+    # Elements per page — forms and buttons with names
+    elem_lines = []
+    for u in crawled_urls[:10]:
+        locs = by_url.get(u, [])
+        if not locs:
+            continue
+        from urllib.parse import urlparse
+        path = urlparse(u).path or "/"
+        elem_lines.append(f"\n### {path}")
+        forms = [l for l in locs if l.get("identity", {}).get("role") in
+                 ("textbox", "combobox", "searchbox", "checkbox")]
+        btns  = [l for l in locs if l.get("identity", {}).get("role") == "button"]
+        links = [l for l in locs if l.get("identity", {}).get("role") == "link"
+                 and l.get("identity", {}).get("container") != "nav"]
+        if forms:
+            names = [l.get("identity", {}).get("name", "?") for l in forms[:8]]
+            elem_lines.append(f"  Inputs: {', '.join(n for n in names if n)}")
+        if btns:
+            names = [l.get("identity", {}).get("name", "?") for l in btns[:6]]
+            elem_lines.append(f"  Buttons: {', '.join(n for n in names if n)}")
+        if links:
+            names = [l.get("identity", {}).get("name", "?") for l in links[:6]]
+            elem_lines.append(f"  Links: {', '.join(n for n in names if n)}")
+    elements_per_page = "\n".join(elem_lines) or "(no element data)"
+
+    # Nav flows — derive from locator URL patterns (transitions recorded after runs)
+    # For now summarise as: "Pages with nav links leading to other pages"
+    nav_lines = []
+    for u in crawled_urls[:10]:
+        locs = by_url.get(u, [])
+        nav_locs = [l for l in locs if l.get("identity", {}).get("role") == "link"]
+        for loc in nav_locs[:5]:
+            name = loc.get("identity", {}).get("name", "")
+            chain = loc.get("locators", {}).get("chain", [])
+            href = next((c.get("value", "") for c in chain
+                         if c.get("strategy") == "href"), "")
+            if name and href and href.startswith("http"):
+                from urllib.parse import urlparse as _up
+                nav_lines.append(
+                    f"- {_up(u).path or '/'} → click \"{name}\" → {_up(href).path or '/'}"
+                )
+    nav_flows = "\n".join(nav_lines[:30]) or "(will be populated after first test run)"
+
+    return page_inventory, nav_flows, elements_per_page
+
+
+async def _synthesize_prd(
+    locator_db,
+    url: str,
+    crawl_results: list,
+    ai_client,
+    log,
+) -> str:
+    """
+    Use AI to write a flow-aware PRD from crawl data.
+
+    Replaces the element-listing approach with a proper PRD that includes:
+    - User goals per flow
+    - Prerequisites (auth requirements, cart state)
+    - Step-by-step interactions
+    - Specific expected outcomes
+
+    Falls back to the old element-list PRD if the AI call fails.
+    """
+    page_inventory, nav_flows, elements_per_page = _build_site_inventory(
+        locator_db, crawl_results
+    )
+    page_count = sum(1 for r in crawl_results if r.get("crawled"))
+
+    prompt = _PRD_SYNTHESIS_PROMPT.format(
+        url=url,
+        page_count=page_count,
+        page_inventory=page_inventory,
+        nav_flows=nav_flows,
+        elements_per_page=elements_per_page,
+    )
+
+    try:
+        # Use small model — synthesis is a summarisation task, not deep reasoning
+        model_override = ai_client.small_model if hasattr(ai_client, "small_model") else None
+        prd = await asyncio.to_thread(
+            ai_client.complete,
+            prompt,
+            _PRD_SYNTHESIS_SYSTEM,
+            4096,
+            0,
+            model_override,
+        )
+        log.info("AI-synthesized PRD: %d chars, %d pages analysed", len(prd), page_count)
+        return prd
+    except Exception as exc:
+        log.warning("PRD synthesis failed (%s), falling back to element list", exc)
+        return _build_element_list_prd(locator_db, url, crawl_results)
+
+
+def _build_element_list_prd(locator_db, url: str, crawl_results: list) -> str:
+    """
+    Fallback: flat element-list PRD (original implementation).
+    Used when the AI synthesis call fails.
     """
     crawled_urls = [r["url"] for r in crawl_results if r.get("crawled")]
 
@@ -100,45 +275,41 @@ def _build_auto_prd(locator_db, url: str, crawl_results: list) -> str:
         "- Verify the main content area is visible",
     ]
 
-    # Discover page structure from locators
     all_locs = locator_db.get_all_locators(valid_only=True)
-    forms = [l for l in all_locs if l.get("role") in ("textbox", "combobox", "searchbox")]
-    nav_links = [l for l in all_locs if l.get("role") == "link" and l.get("container") == "nav"]
-    buttons = [l for l in all_locs if l.get("role") == "button"]
+    forms = [l for l in all_locs if l.get("identity", {}).get("role") in
+             ("textbox", "combobox", "searchbox")]
+    nav_links = [l for l in all_locs if l.get("identity", {}).get("role") == "link"
+                 and l.get("identity", {}).get("container") == "nav"]
+    buttons = [l for l in all_locs if l.get("identity", {}).get("role") == "button"]
 
     if nav_links:
-        lines.append("")
-        lines.append("### TC2: Navigation links are functional")
-        lines.append("- Click primary navigation links and verify pages load")
+        lines += ["", "### TC2: Navigation links are functional",
+                  "- Click primary navigation links and verify pages load"]
         for link in nav_links[:3]:
-            name = link.get("name", "")
+            name = link.get("identity", {}).get("name", "")
             if name:
                 lines.append(f"- Navigation link: \"{name}\"")
 
     if forms:
-        lines.append("")
         tc_num = "TC3" if nav_links else "TC2"
-        lines.append(f"### {tc_num}: Forms are interactable")
-        lines.append("- Locate form inputs on the page")
-        lines.append("- Verify form elements are visible and enabled")
+        lines += ["", f"### {tc_num}: Forms are interactable",
+                  "- Locate form inputs on the page",
+                  "- Verify form elements are visible and enabled"]
         for inp in forms[:5]:
-            name = inp.get("name", "")
+            name = inp.get("identity", {}).get("name", "")
             if name:
                 lines.append(f"- Form field: \"{name}\"")
 
     if not nav_links and not forms and buttons:
-        lines.append("")
-        lines.append("### TC2: Interactive elements are present")
-        lines.append(f"- Verify at least {min(len(buttons), 3)} buttons are visible")
+        lines += ["", "### TC2: Interactive elements are present",
+                  f"- Verify at least {min(len(buttons), 3)} buttons are visible"]
         for btn in buttons[:3]:
-            name = btn.get("name", "")
+            name = btn.get("identity", {}).get("name", "")
             if name:
                 lines.append(f"- Button: \"{name}\"")
 
-    # Discovered pages context
     if len(crawled_urls) > 1:
-        lines.append("")
-        lines.append("## Discovered Pages")
+        lines += ["", "## Discovered Pages"]
         for page_url in crawled_urls[:10]:
             page_locs = locator_db.get_all(page_url, valid_only=True)
             lines.append(f"- {page_url} ({len(page_locs)} elements)")
@@ -241,7 +412,7 @@ def _extract_issues(exec_results: list) -> list:
             counter += 1
             issues.append({
                 "id": f"issue-{counter:03d}",
-                "severity": "medium",
+                "severity": "low",
                 "rule": "CONSOLE_ERROR",
                 "message": f"[{tc_id}] Console error: {str(err.get('text', ''))[:200]}",
                 "page": err.get("url", test_url) or "unknown",
@@ -363,6 +534,22 @@ def _build_report(
     Assemble the final Report dict matching the extension's Report interface.
     """
     issues = _extract_issues(exec_results)
+
+    # Deduplicate passive issues (same console/network error across multiple tests = 1 entry)
+    # Strip [TCxxx] prefix from message before keying so identical errors across tests collapse.
+    seen_passive: set = set()
+    deduped: list = []
+    for issue in issues:
+        if issue["rule"] in ("CONSOLE_ERROR", "NETWORK_FAILURE", "JS_EXCEPTION"):
+            msg = issue["message"]
+            bare = msg[msg.find("] ") + 2:] if "] " in msg else msg
+            key = (issue["rule"], bare[:100])
+            if key in seen_passive:
+                continue
+            seen_passive.add(key)
+        deduped.append(issue)
+    issues = deduped
+
     score = _calculate_score(issues)
     repro_test = _generate_playwright_test(exec_results, credentials=credentials)
 
@@ -462,11 +649,11 @@ async def run_deep_scan(job_id: str) -> None:
         _update_job(job_id, log=log, progress=30, message=f"Crawled {crawled_count} pages")
         log.info("Crawled %d pages", crawled_count)
 
-        # ── 3. Auto-PRD (35%) ────────────────────────────────────────
+        # ── 3. AI PRD synthesis (35%) ────────────────────────────────
         stage = "plan"
-        _update_job(job_id, log=log, progress=35, message="Analyzing site structure...")
-        prd_content = _build_auto_prd(locator_db, url, crawl_results)
-        log.info("Auto-PRD generated (%d chars)", len(prd_content))
+        _update_job(job_id, log=log, progress=35, message="Understanding site structure...")
+        prd_content = await _synthesize_prd(locator_db, url, crawl_results, ai_client, log)
+        log.info("PRD synthesized (%d chars)", len(prd_content))
 
         # ── 4. Plan (40→55%) — sync method, run in thread ────────────
         _update_job(job_id, log=log, progress=40, message="Generating test plans...")
@@ -510,7 +697,7 @@ async def run_deep_scan(job_id: str) -> None:
                     valid_plans,
                     concurrency=settings.SCAN_EXEC_CONCURRENCY,
                 ),
-                timeout=settings.SCAN_TIMEOUT_SECONDS * 0.5,
+                timeout=settings.SCAN_TIMEOUT_SECONDS * 0.7,
             )
 
         _update_job(job_id, log=log, progress=85, message="Tests complete, building report...")
@@ -528,7 +715,8 @@ async def run_deep_scan(job_id: str) -> None:
             report["generated_test"] = generated_test
             log.info("Codegen: %d chars of pytest code generated", len(generated_test))
         except Exception as cg_err:
-            log.warning("Codegen failed (non-fatal): %s", cg_err)
+            import traceback as _tb
+            log.warning("Codegen failed (non-fatal): %s\n%s", cg_err, _tb.format_exc())
             report["generated_test"] = None
 
         # ── 7. Narration (95→100%) ────────────────────────────────────
@@ -575,6 +763,14 @@ async def run_deep_scan(job_id: str) -> None:
             timeout_stage=stage,
             credentials=credentials,
         )
+
+        # Codegen on partial results (if we have any plans)
+        try:
+            from codegen import generate_test_file_multi
+            if valid_plans:
+                report["generated_test"] = generate_test_file_multi(valid_plans)
+        except Exception:
+            report["generated_test"] = None
 
         # Template narration for timeouts (skip AI to save time)
         try:

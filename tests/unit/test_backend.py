@@ -668,7 +668,7 @@ class TestWorkerHelpers:
         issues = _extract_issues(exec_results)
         assert len(issues) == 3
         severities = {i["rule"]: i["severity"] for i in issues}
-        assert severities["CONSOLE_ERROR"] == "medium"
+        assert severities["CONSOLE_ERROR"] == "low"
         assert severities["JS_EXCEPTION"] == "high"
         assert severities["NETWORK_FAILURE"] == "medium"
 
@@ -782,6 +782,37 @@ class TestWorkerHelpers:
         assert "crawl" in report["summary"].lower()
         assert report["score"] == 100  # no issues found (timed out before execution)
 
+    def test_build_report_deduplicates_passive_issues(self):
+        """Same console error across multiple tests counts only once."""
+        from backend.worker import _build_report
+
+        repeated_passive = {
+            "console_errors": [{"text": "Uncaught TypeError: x is null", "url": "https://x.com"}],
+            "js_exceptions": [],
+            "network_failures": [],
+        }
+        exec_results = [
+            {
+                "id": f"TC{i:03d}",
+                "status": "pass",
+                "steps": [],
+                "assertions": [],
+                "passive_errors": repeated_passive,
+            }
+            for i in range(5)  # same console error in 5 tests
+        ]
+        report = _build_report(
+            url="https://x.com",
+            crawl_results=[],
+            exec_results=exec_results,
+            duration_ms=1000,
+        )
+        # Deduplication: 5 identical console errors → 1 issue, not 5
+        console_issues = [i for i in report["issues"] if i["rule"] == "CONSOLE_ERROR"]
+        assert len(console_issues) == 1
+        # Score: 1 low-severity issue (1 pt) → 99, not 0
+        assert report["score"] == 99
+
     def test_update_job(self):
         """_update_job writes fields to the DB correctly."""
         from backend.worker import _update_job
@@ -806,17 +837,17 @@ class TestWorkerHelpers:
         assert job.message == "Halfway"
         db.close()
 
-    def test_build_auto_prd(self):
-        """Auto-PRD contains expected sections from mock locators."""
+    def test_build_element_list_prd(self):
+        """Fallback PRD contains expected sections from mock locators."""
         from unittest.mock import MagicMock
-        from backend.worker import _build_auto_prd
+        from backend.worker import _build_element_list_prd
 
         mock_db = MagicMock()
         mock_db.get_all_locators.return_value = [
-            {"role": "link", "name": "Home", "container": "nav"},
-            {"role": "link", "name": "About", "container": "nav"},
-            {"role": "textbox", "name": "Email"},
-            {"role": "button", "name": "Submit"},
+            {"identity": {"role": "link", "name": "Home", "container": "nav"}},
+            {"identity": {"role": "link", "name": "About", "container": "nav"}},
+            {"identity": {"role": "textbox", "name": "Email", "container": ""}},
+            {"identity": {"role": "button", "name": "Submit", "container": ""}},
         ]
         mock_db.get_all.return_value = [{"id": 1}, {"id": 2}]
 
@@ -825,7 +856,7 @@ class TestWorkerHelpers:
             {"url": "https://example.com/about", "crawled": True},
         ]
 
-        prd = _build_auto_prd(mock_db, "https://example.com", crawl_results)
+        prd = _build_element_list_prd(mock_db, "https://example.com", crawl_results)
 
         assert "Smoke Test" in prd
         assert "example.com" in prd
@@ -1109,7 +1140,10 @@ class TestCodegen:
         from codegen import _action_to_code
         step = {"action": "navigate", "url": "https://example.com/login"}
         lines = _action_to_code(step)
-        assert lines == ['page.goto("https://example.com/login", wait_until="domcontentloaded")']
+        assert lines == [
+            'page.goto("https://example.com/login", wait_until="domcontentloaded")',
+            'page.wait_for_load_state("networkidle")',
+        ]
 
     def test_action_click(self):
         from codegen import _action_to_code
