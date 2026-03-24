@@ -88,6 +88,7 @@ class StepHealer:
                 prompt,
                 system_prompt=_HEALER_SYSTEM,
                 max_tokens=500,
+                model_override=self._ai.small_model,
             )
             return self._parse_step(raw)
         except Exception as e:

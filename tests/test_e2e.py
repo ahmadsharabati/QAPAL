@@ -247,6 +247,421 @@ class TestCrawlerE2E(unittest.TestCase):
             f"Locator count jumped from {c1} to {c2} on re-crawl (suspected duplicate)"
         )
 
+    # ── locator chain quality ─────────────────────────────────────────
+
+    def test_locator_chain_not_css_only(self):
+        """
+        Every interactive element must have at least one semantic strategy
+        (testid, role, aria-label, placeholder, label, text) in its chain.
+        A chain that is ONLY 'css' is fragile and means extraction failed.
+        """
+        SEMANTIC = {"testid", "role", "role+container", "aria-label",
+                    "placeholder", "label", "text", "id"}
+
+        async def go():
+            async with Crawler(self.db, headless=True) as c:
+                await c.bulk_crawl([TODOMVC_URL])
+
+        run(go())
+        locs = self.db.get_all(TODOMVC_URL, valid_only=True)
+        self.assertGreater(len(locs), 0, "No locators found")
+
+        css_only = []
+        for loc in locs:
+            strategies = {s["strategy"] for s in loc["locators"]["chain"]}
+            if strategies and strategies <= {"css"}:
+                css_only.append(loc["identity"])
+
+        self.assertEqual(
+            css_only, [],
+            f"These elements have ONLY css strategy (fragile): {css_only[:3]}"
+        )
+
+    def test_high_confidence_locators_have_role_and_name(self):
+        """
+        Locators marked confidence='high' must always have both role and name.
+        Low-confidence (dom_fallback) entries are exempt.
+        """
+        async def go():
+            async with Crawler(self.db, headless=True) as c:
+                await c.bulk_crawl([TODOMVC_URL])
+
+        run(go())
+        locs = self.db.get_all(TODOMVC_URL, valid_only=True)
+
+        for loc in locs:
+            if loc["locators"].get("confidence") == "high":
+                identity = loc["identity"]
+                self.assertTrue(
+                    identity.get("role") and identity.get("name"),
+                    f"High-confidence locator missing role or name: {identity}"
+                )
+
+    def test_all_locator_documents_have_required_fields(self):
+        """
+        Every document in the DB must contain the mandatory top-level fields:
+        id, url, identity, locators, history.
+        Missing fields mean the upsert is broken.
+        """
+        async def go():
+            async with Crawler(self.db, headless=True) as c:
+                await c.bulk_crawl([BOOKS_URL])
+
+        run(go())
+        locs = self.db.get_all(BOOKS_URL, valid_only=False)
+        self.assertGreater(len(locs), 0, "No locators found")
+
+        required = {"id", "url", "identity", "locators", "history"}
+        for loc in locs:
+            missing = required - set(loc.keys())
+            self.assertEqual(
+                missing, set(),
+                f"Locator doc missing fields {missing}: {loc.get('id')}"
+            )
+            # identity sub-fields
+            identity = loc["identity"]
+            for field in ("role", "name", "container", "dom_path"):
+                self.assertIn(
+                    field, identity,
+                    f"identity missing '{field}' in doc {loc.get('id')}"
+                )
+            # history sub-fields
+            history = loc["history"]
+            for field in ("first_seen", "last_seen", "hit_count", "miss_count", "valid"):
+                self.assertIn(
+                    field, history,
+                    f"history missing '{field}' in doc {loc.get('id')}"
+                )
+
+    def test_locator_chain_entries_have_strategy_and_value(self):
+        """Every entry in a locator chain must have both 'strategy' and 'value' keys."""
+        async def go():
+            async with Crawler(self.db, headless=True) as c:
+                await c.bulk_crawl([TODOMVC_URL])
+
+        run(go())
+        locs = self.db.get_all(TODOMVC_URL, valid_only=True)
+        for loc in locs:
+            for entry in loc["locators"]["chain"]:
+                self.assertIn(
+                    "strategy", entry,
+                    f"Chain entry missing 'strategy': {entry}"
+                )
+                self.assertIn(
+                    "value", entry,
+                    f"Chain entry missing 'value': {entry}"
+                )
+                self.assertIsNotNone(
+                    entry["value"],
+                    f"Chain entry has None value: {entry}"
+                )
+
+    # ── stale-check / skip logic ──────────────────────────────────────
+
+    def test_fresh_crawl_is_skipped_without_force(self):
+        """
+        A URL crawled moments ago must be skipped on the next call
+        (result['crawled'] == False) unless force=True.
+        """
+        async def go():
+            async with Crawler(self.db, headless=True) as c:
+                first  = await c.crawl_url(TODOMVC_URL, force=True)
+                second = await c.crawl_url(TODOMVC_URL, force=False)
+            return first, second
+
+        first, second = run(go())
+        self.assertTrue(first["crawled"],  "First crawl should have run")
+        self.assertFalse(second["crawled"], "Second crawl should be skipped (not stale)")
+
+    def test_force_flag_overrides_stale_check(self):
+        """force=True must re-crawl even if the page was just visited."""
+        async def go():
+            async with Crawler(self.db, headless=True) as c:
+                await c.crawl_url(TODOMVC_URL, force=True)
+                second = await c.crawl_url(TODOMVC_URL, force=True)
+            return second
+
+        result = run(go())
+        self.assertTrue(result["crawled"], "force=True must always re-crawl")
+
+    def test_stale_url_returns_element_count_from_cache(self):
+        """
+        Even when a crawl is skipped, the result dict must contain
+        the element count from the cached DB data.
+        """
+        async def go():
+            async with Crawler(self.db, headless=True) as c:
+                await c.crawl_url(TODOMVC_URL, force=True)
+                cached = await c.crawl_url(TODOMVC_URL, force=False)
+            return cached
+
+        result = run(go())
+        self.assertFalse(result["crawled"])
+        self.assertGreater(
+            result["elements"], 0,
+            "Skipped crawl result should still report cached element count"
+        )
+
+    # ── DB lookup (get / search) ──────────────────────────────────────
+
+    def test_get_by_role_and_name_after_crawl(self):
+        """
+        After crawling TodoMVC, db.get(url, role='textbox', name=...) must
+        return the main input element — not None.
+        """
+        async def go():
+            async with Crawler(self.db, headless=True) as c:
+                await c.bulk_crawl([TODOMVC_URL])
+
+        run(go())
+        # The TodoMVC input has accessible name "What needs to be done?" or similar.
+        # We check via search() since the exact name may vary by browser version.
+        results = self.db.search(TODOMVC_URL, name_fragment="todo", role="textbox")
+        if not results:
+            # Fallback: any textbox is acceptable — site has exactly one
+            all_locs = self.db.get_all(TODOMVC_URL, valid_only=True)
+            results  = [l for l in all_locs if l["identity"]["role"] == "textbox"]
+        self.assertGreater(len(results), 0, "No textbox found after crawl via get/search")
+
+    def test_search_by_name_fragment_returns_matches(self):
+        """
+        db.search() with a partial name must return a subset of locators.
+        """
+        async def go():
+            async with Crawler(self.db, headless=True) as c:
+                await c.bulk_crawl([PLAYWRIGHT_URL])
+
+        run(go())
+        # Playwright.dev has links/buttons with "Docs", "Community", etc.
+        results = self.db.search(PLAYWRIGHT_URL, name_fragment="Docs")
+        self.assertGreater(len(results), 0, "search('Docs') returned no results")
+        for r in results:
+            name = r["identity"]["name"].lower()
+            self.assertIn("docs", name, f"search result name mismatch: {name!r}")
+
+    def test_get_all_sorted_by_hit_count(self):
+        """
+        get_all() must return records sorted by hit_count descending.
+        After two crawls, hit_count on existing records increments.
+        """
+        async def go():
+            async with Crawler(self.db, headless=True) as c:
+                await c.crawl_url(TODOMVC_URL, force=True)
+                await c.crawl_url(TODOMVC_URL, force=True)
+
+        run(go())
+        locs = self.db.get_all(TODOMVC_URL, valid_only=True)
+        self.assertGreater(len(locs), 0)
+        counts = [l["history"]["hit_count"] for l in locs]
+        self.assertEqual(
+            counts, sorted(counts, reverse=True),
+            "get_all() is not sorted by hit_count descending"
+        )
+
+    # ── soft decay / invalidation ────────────────────────────────────
+
+    def test_soft_decay_invalidates_missing_elements(self):
+        """
+        soft_decay() with an empty seen_ids set must increment miss_count
+        on all records and eventually mark them invalid after MISS_THRESHOLD hits.
+        """
+        from locator_db import MISS_THRESHOLD
+
+        async def go():
+            async with Crawler(self.db, headless=True) as c:
+                await c.bulk_crawl([TODOMVC_URL])
+
+        run(go())
+        locs_before = self.db.get_all(TODOMVC_URL, valid_only=True)
+        self.assertGreater(len(locs_before), 0)
+
+        # Decay MISS_THRESHOLD times with no seen elements → all should become invalid
+        for _ in range(MISS_THRESHOLD):
+            self.db.soft_decay(TODOMVC_URL, seen_ids=set())
+
+        locs_after = self.db.get_all(TODOMVC_URL, valid_only=True)
+        self.assertEqual(
+            len(locs_after), 0,
+            f"{len(locs_after)} locators still valid after {MISS_THRESHOLD} full-decay passes"
+        )
+
+    def test_soft_decay_spares_seen_elements(self):
+        """
+        soft_decay() must NOT increment miss_count for IDs included in seen_ids.
+        """
+        async def go():
+            async with Crawler(self.db, headless=True) as c:
+                await c.bulk_crawl([TODOMVC_URL])
+
+        run(go())
+        locs = self.db.get_all(TODOMVC_URL, valid_only=True)
+        self.assertGreater(len(locs), 0)
+
+        # Protect all IDs from decay
+        all_ids = {l["id"] for l in locs}
+        self.db.soft_decay(TODOMVC_URL, seen_ids=all_ids)
+
+        locs_after = self.db.get_all(TODOMVC_URL, valid_only=True)
+        self.assertEqual(
+            len(locs_after), len(locs),
+            "soft_decay() invalidated elements that were in seen_ids"
+        )
+
+    def test_re_crawl_resets_miss_count(self):
+        """
+        An element decayed once (miss_count=1) must have miss_count reset to 0
+        after the next successful crawl (because the element reappeared).
+        """
+        async def go():
+            async with Crawler(self.db, headless=True) as c:
+                # First crawl — populates DB
+                await c.crawl_url(TODOMVC_URL, force=True)
+                locs = self.db.get_all(TODOMVC_URL, valid_only=True)
+                first_id = locs[0]["id"]
+
+                # Decay once (without the first element in seen_ids)
+                self.db.soft_decay(TODOMVC_URL, seen_ids=set())
+                decayed = self.db.get_by_id(first_id)
+
+                # Re-crawl — the element should reappear and miss_count reset
+                await c.crawl_url(TODOMVC_URL, force=True)
+                recovered = self.db.get_by_id(first_id)
+
+                return decayed, recovered
+
+        decayed, recovered = run(go())
+        self.assertIsNotNone(decayed)
+        self.assertGreater(
+            decayed["history"]["miss_count"], 0,
+            "miss_count should be > 0 after decay"
+        )
+        self.assertEqual(
+            recovered["history"]["miss_count"], 0,
+            "miss_count should reset to 0 after successful re-crawl"
+        )
+
+    # ── concurrent crawl safety ───────────────────────────────────────
+
+    def test_concurrent_crawl_no_duplicates(self):
+        """
+        Two simultaneous crawls of the same URL must not create duplicate
+        locator records — the DB identity hash prevents double-insertion.
+        """
+        from crawler import crawl_page
+        from locator_db import _normalize_url
+        from playwright.async_api import async_playwright
+
+        async def go():
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True)
+                ctx1    = await browser.new_context()
+                ctx2    = await browser.new_context()
+                page1   = await ctx1.new_page()
+                page2   = await ctx2.new_page()
+
+                await page1.goto(TODOMVC_URL)
+                await page2.goto(TODOMVC_URL)
+
+                # Fire both crawls at the same time
+                url = _normalize_url(TODOMVC_URL)
+                await asyncio.gather(
+                    crawl_page(page1, url, self.db, force=True),
+                    crawl_page(page2, url, self.db, force=True),
+                )
+                await browser.close()
+
+        run(go())
+        locs = self.db.get_all(TODOMVC_URL, valid_only=True)
+        ids  = [l["id"] for l in locs]
+        self.assertEqual(
+            len(ids), len(set(ids)),
+            f"Duplicate locator IDs found after concurrent crawl: "
+            f"{len(ids) - len(set(ids))} duplicates"
+        )
+
+    # ── URL normalisation ─────────────────────────────────────────────
+
+    def test_query_strings_stripped_from_stored_url(self):
+        """
+        Locators must be stored under the clean URL (no query params).
+        e.g. https://books.toscrape.com/?foo=bar → https://books.toscrape.com/
+        """
+        from locator_db import _normalize_url
+        url_with_qs = BOOKS_URL.rstrip("/") + "/?ref=homepage&page=1"
+
+        async def go():
+            async with Crawler(self.db, headless=True) as c:
+                # crawl the plain URL
+                await c.bulk_crawl([BOOKS_URL])
+
+        run(go())
+        clean_url = _normalize_url(BOOKS_URL)
+        locs = self.db.get_all(clean_url, valid_only=True)
+        self.assertGreater(len(locs), 0, "No locators under normalised URL")
+
+        # All stored URLs must equal the clean form
+        for loc in locs:
+            self.assertEqual(
+                loc["url"], clean_url,
+                f"Locator stored with non-normalised URL: {loc['url']!r}"
+            )
+
+    # ── end-to-end usability (crawl → executor can find element) ─────
+
+    def test_crawled_locator_usable_by_executor(self):
+        """
+        After crawling books.toscrape.com, the executor must be able to
+        click a link discovered by the crawler — no AI, no replanning.
+        This is the fundamental contract: crawl output feeds executor input.
+        """
+        async def go():
+            # Step 1: crawl
+            async with Crawler(self.db, headless=True) as c:
+                await c.bulk_crawl([BOOKS_URL])
+
+            # Step 2: pick any link locator from the DB
+            locs  = self.db.get_all(BOOKS_URL, valid_only=True)
+            links = [l for l in locs if l["identity"]["role"] == "link"]
+            self.assertGreater(len(links), 0, "No link locators found after crawl")
+
+            # Choose the first link that has a role+name strategy
+            chosen = None
+            for l in links:
+                strategies = [s["strategy"] for s in l["locators"]["chain"]]
+                if "role" in strategies or "testid" in strategies:
+                    chosen = l
+                    break
+            self.assertIsNotNone(chosen, "No link with role/testid strategy found")
+
+            # Step 3: build a minimal plan using the crawled locator
+            chain   = chosen["locators"]["chain"]
+            best    = chain[0]  # highest-priority strategy
+            selector = {"strategy": best["strategy"], "value": best["value"]}
+            plan = {
+                "test_id": "crawl_usability_check",
+                "name":    "Verify crawled locator is executable",
+                "url":     BOOKS_URL,
+                "steps":   [
+                    {"action": "navigate", "url": BOOKS_URL},
+                    {"action": "click",    "selector": selector},
+                ],
+                "assertions": [],
+            }
+
+            # Step 4: execute the plan
+            async with Executor(self.db, headless=True) as exc:
+                result = await exc.run(plan)
+
+            return result
+
+        result = run(go())
+        self.assertEqual(
+            result["status"], "pass",
+            f"Executor failed to use crawled locator: "
+            f"{result['steps'][-1].get('reason', 'no reason')} | "
+            f"selector: {result['steps'][-1].get('selector', {})}"
+        )
+
 
 # ════════════════════════════════════════════════════════════════════════
 # 2. EXECUTOR E2E

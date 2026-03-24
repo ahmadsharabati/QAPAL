@@ -548,6 +548,9 @@ async def crawl_page(
     # Main frame — a11y
     try:
         a11y = await page.evaluate(A11Y_JS)
+        if not isinstance(a11y, list):
+            all_warnings.append(f"a11y JS returned unexpected type {type(a11y).__name__}, expected list")
+            a11y = []
         for el in a11y:
             el["frameId"] = "main"
         all_elements.extend(a11y)
@@ -557,6 +560,9 @@ async def crawl_page(
     # Main frame — DOM fallback
     try:
         dom_els = await page.evaluate(DOM_FALLBACK_JS)
+        if not isinstance(dom_els, list):
+            all_warnings.append(f"DOM fallback JS returned unexpected type {type(dom_els).__name__}, expected list")
+            dom_els = []
         for el in dom_els:
             el["frameId"] = "main"
         all_elements.extend(dom_els)
@@ -575,6 +581,8 @@ async def crawl_page(
 
         try:
             frame_a11y = await frame.evaluate(A11Y_JS)
+            if not isinstance(frame_a11y, list):
+                frame_a11y = []
             for el in frame_a11y:
                 el["frameId"]     = frame_url
                 el["frameName"]   = frame.name or ""
@@ -582,6 +590,8 @@ async def crawl_page(
             all_elements.extend(frame_a11y)
 
             frame_dom = await frame.evaluate(DOM_FALLBACK_JS)
+            if not isinstance(frame_dom, list):
+                frame_dom = []
             for el in frame_dom:
                 el["frameId"]     = frame_url
                 el["frameName"]   = frame.name or ""
@@ -600,7 +610,29 @@ async def crawl_page(
                 "actionable": False,
             })
 
-    print(f"DEBUG: Found {len(all_elements)} elements on {url}")
+    log.debug("collected %d raw elements from %s", len(all_elements), url)
+
+    # Guard: if nothing was collected at all, the page probably didn't render
+    # (blank page, error page, network interstitial, JavaScript crash).
+    # Bail out early so we don't stamp the page as "freshly crawled" and then
+    # skip it on the next call — that would cache a broken empty result.
+    actionable_count = sum(1 for el in all_elements if el.get("actionable"))
+    if actionable_count == 0 and not all_warnings:
+        all_warnings.append(
+            "Zero actionable elements found — page may not have rendered correctly"
+        )
+    if len(all_elements) == 0:
+        log.warning("crawl yielded 0 elements for %s — aborting upsert to avoid caching empty result", url)
+        return {
+            "url":      url,
+            "crawled":  False,
+            "elements": 0,
+            "new":      0,
+            "updated":  0,
+            "invalid":  0,
+            "warnings": all_warnings,
+        }
+
     # Upsert into DB
     new_count = updated_count = 0
     for el in all_elements:
@@ -778,18 +810,41 @@ class Crawler:
                                 state_graph=self._state_graph)
 
     async def crawl_url(self, url: str, force: bool = False) -> dict:
-        """Crawl a single URL in an isolated context."""
+        """
+        Crawl a single URL in an isolated context.
+        Retries once on transient network failure (DNS blip, connection reset).
+        """
         if not self._started:
             await self.start()
-        ctx  = await _build_context(self._browser, self._db, url, self._credentials)
-        page = await ctx.new_page()
-        try:
-            await page.goto(url, wait_until="domcontentloaded")
-            await wait_for_stable(page)
-            return await crawl_page(page, _normalize_url(url), self._db, force=force,
-                                    state_graph=self._state_graph)
-        finally:
-            await ctx.close()
+
+        last_err: Exception = None
+        for attempt in range(2):  # 1 attempt + 1 retry
+            ctx  = await _build_context(self._browser, self._db, url, self._credentials)
+            page = await ctx.new_page()
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                await wait_for_stable(page)
+                return await crawl_page(page, _normalize_url(url), self._db, force=force,
+                                        state_graph=self._state_graph)
+            except Exception as e:
+                last_err = e
+                log.warning("crawl_url attempt %d failed for %s: %s", attempt + 1, url, e)
+            finally:
+                await ctx.close()
+
+            if attempt == 0:
+                await asyncio.sleep(2)  # brief pause before retry
+
+        # Both attempts failed — return a failure result (do not raise)
+        return {
+            "url":      _normalize_url(url),
+            "crawled":  False,
+            "elements": 0,
+            "new":      0,
+            "updated":  0,
+            "invalid":  0,
+            "warnings": [f"crawl_url failed after 2 attempts: {last_err}"],
+        }
 
     async def bulk_crawl(
         self,
@@ -814,8 +869,22 @@ class Crawler:
                 ctx  = await _build_context(self._browser, self._db, url, self._credentials)
                 page = await ctx.new_page()
                 try:
-                    await page.goto(url, wait_until="domcontentloaded")
+                    # Network fetch + JS evaluation run in parallel across URLs.
+                    # Only the final DB writes are serialised (via db_lock) to
+                    # prevent TinyDB race conditions on concurrent upserts.
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                     await wait_for_stable(page)
+                except Exception as e:
+                    await ctx.close()
+                    results.append({
+                        "url": _normalize_url(url), "crawled": False,
+                        "elements": 0, "new": 0, "updated": 0, "invalid": 0,
+                        "warnings": [f"Page load failed: {e}"],
+                    })
+                    log.warning("  [failed]  %s — %s", url, e)
+                    return
+
+                try:
                     async with db_lock:
                         result = await crawl_page(page, _normalize_url(url), self._db, force=force,
                                                   state_graph=self._state_graph)
@@ -823,7 +892,7 @@ class Crawler:
                     result = {
                         "url": _normalize_url(url), "crawled": False,
                         "elements": 0, "new": 0, "updated": 0, "invalid": 0,
-                        "warnings": [f"Crawl failed: {e}"],
+                        "warnings": [f"Crawl extraction failed: {e}"],
                     }
                 finally:
                     await ctx.close()
