@@ -108,6 +108,9 @@ RULES:
 - If you see a cart/checkout flow: trace it fully — add item → cart → checkout → confirm
 - If you see search: test search → results → item click
 - Never invent pages or buttons not present in the crawl data
+- For dropdown/submenu navigation: if a category or section link is reachable via a direct
+  URL (visible in Navigation Flows), use navigate(url) rather than clicking a hidden dropdown
+  item — this avoids hover-to-reveal race conditions in automated tests
 """
 
 _PRD_SYNTHESIS_PROMPT = """\
@@ -172,6 +175,8 @@ def _build_site_inventory(locator_db, crawl_results: list) -> tuple[str, str, st
         btns  = [l for l in locs if l.get("identity", {}).get("role") == "button"]
         links = [l for l in locs if l.get("identity", {}).get("role") == "link"
                  and l.get("identity", {}).get("container") != "nav"]
+        nav_links = [l for l in locs if l.get("identity", {}).get("role") == "link"
+                     and l.get("identity", {}).get("container") == "nav"]
         if forms:
             names = [l.get("identity", {}).get("name", "?") for l in forms[:8]]
             elem_lines.append(f"  Inputs: {', '.join(n for n in names if n)}")
@@ -181,6 +186,19 @@ def _build_site_inventory(locator_db, crawl_results: list) -> tuple[str, str, st
         if links:
             names = [l.get("identity", {}).get("name", "?") for l in links[:6]]
             elem_lines.append(f"  Links: {', '.join(n for n in names if n)}")
+        if nav_links:
+            def _href(loc):
+                chain = loc.get("locators", {}).get("chain", [])
+                return next((c.get("value", "") for c in chain if c.get("strategy") == "href"), "")
+            nav_parts = []
+            for l in nav_links[:8]:
+                name = l.get("identity", {}).get("name", "?")
+                href = _href(l)
+                if href:
+                    nav_parts.append(f"{name} ({href})")
+                else:
+                    nav_parts.append(name)
+            elem_lines.append(f"  Nav links: {', '.join(nav_parts)}")
     elements_per_page = "\n".join(elem_lines) or "(no element data)"
 
     # Nav flows — derive from locator URL patterns (transitions recorded after runs)

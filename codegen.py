@@ -375,8 +375,19 @@ def generate_test_file(plan: dict) -> str:
                 # Role/text-based: these are stable — wait directly on the element
                 loc = _selector_to_code(sel)
                 lines.append(f"    {loc}.wait_for(state='visible', timeout=15000)")
+            elif strategy == "testid":
+                # Wait for the specific testid to appear — handles Angular/React boot delay
+                tid_val = sel.get("value", "")
+                if isinstance(tid_val, dict):
+                    tid_val = tid_val.get("value", tid_val.get("testid", str(tid_val)))
+                tid_val = str(tid_val)
+                m = _TESTID_ULID_RE.match(tid_val)
+                if m:
+                    lines.append(f"    page.wait_for_selector('[data-testid^=\"{_escape(m.group(1))}\"]', timeout=15000)")
+                else:
+                    lines.append(f"    page.wait_for_selector('[data-testid=\"{_escape(tid_val)}\"]', timeout=15000)")
             else:
-                # testid/css/id: may not render in all contexts — use body-level wait
+                # css/id/testid_prefix: wait for body (SPA shell) to settle
                 lines.append(f"    page.wait_for_selector('body', state='attached')")
 
         if is_external:

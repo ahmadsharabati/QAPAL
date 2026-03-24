@@ -1253,6 +1253,25 @@ class TestCodegen:
         code = generate_test_file(plan)
         compile(code, "<test>", "exec")  # raises SyntaxError if invalid
 
+    def test_generate_test_file_testid_wait_after_navigate(self):
+        """After navigate, testid selector generates wait_for_selector for the specific testid."""
+        from codegen import generate_test_file
+        plan = {
+            "test_id": "TC_spa",
+            "name": "SPA testid wait",
+            "steps": [
+                {"action": "navigate", "url": "https://example.com/"},
+                {"action": "click", "selector": {"strategy": "testid", "value": "nav-sign-in"}},
+            ],
+            "assertions": [],
+        }
+        code = generate_test_file(plan)
+        # Must wait for the specific testid element (handles Angular/React boot delay)
+        assert 'wait_for_selector(\'[data-testid="nav-sign-in"]\'' in code
+        # Must NOT fall back to body-only wait
+        assert "wait_for_selector('body'" not in code
+        compile(code, "<test>", "exec")
+
     def test_generate_test_file_function_name(self):
         """test_id becomes the function name."""
         from codegen import generate_test_file
