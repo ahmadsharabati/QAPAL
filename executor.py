@@ -902,9 +902,8 @@ async def _run_assertion(
                    _assert_fail(a, f"Value '{actual}' does not contain '{val_str}'", actual)
 
         if atype == "element_count":
-            if loc is None:
-                return _assert_fail(a, "Element not found", 0)
-            count    = await loc.count()
+            # loc is None means 0 elements in DOM — treat as count=0 (valid for less_than/equals/at_most 0)
+            count    = 0 if loc is None else await loc.count()
             raw      = a.get("count", value)
             expected = int(raw) if raw is not None and str(raw).isdigit() else 0
             operator = a.get("operator", "equals")

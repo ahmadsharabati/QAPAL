@@ -31,7 +31,7 @@ _log = get_logger("ai_client")
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(override=True)
 except ImportError:
     pass  # python-dotenv optional — env vars may already be set
 
@@ -271,6 +271,10 @@ class _OpenAIClient(AIClient):
             self._client = OpenAI(**kwargs)
         return self._client
 
+    def _is_ollama(self) -> bool:
+        """Returns True when base_url points to a local Ollama instance."""
+        return bool(self._base_url and "11434" in self._base_url)
+
     def _is_nonstandard_endpoint(self) -> bool:
         """Returns True when base_url points to a custom path (e.g. /v1/chat)
         that doesn't follow the standard /v1/chat/completions convention."""
@@ -334,6 +338,40 @@ class _OpenAIClient(AIClient):
         except Exception:
             return raw
 
+    def _complete_ollama(
+        self,
+        messages:    list,
+        model:       str,
+        max_tokens:  int,
+        temperature: float,
+    ) -> str:
+        """Use the native Ollama /api/chat endpoint with think:false.
+        The OpenAI-compat /v1 path strips <think> tokens and returns empty content
+        for Qwen3.x models; the native endpoint is more reliable."""
+        import httpx, json as _json
+        from urllib.parse import urlparse
+        parsed = urlparse(self._base_url)  # type: ignore[arg-type]
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        payload = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "think": False,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+            },
+        }
+        resp = httpx.post(
+            f"{base}/api/chat",
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            timeout=None,  # local models can be slow; wait indefinitely
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("message", {}).get("content", "") or ""
+
     def complete(
         self,
         prompt:         str,
@@ -348,6 +386,11 @@ class _OpenAIClient(AIClient):
         messages.append({"role": "user", "content": prompt})
 
         model = model_override or self.model
+
+        # Ollama: use native /api/chat endpoint (think:false) — avoids empty
+        # responses caused by Qwen3.x thinking tokens and OpenAI-compat stripping
+        if self._is_ollama():
+            return self._complete_ollama(messages, model, max_tokens, temperature)
 
         # Non-standard endpoint (e.g. Hypereal /v1/chat) — bypass OpenAI SDK
         if self._is_nonstandard_endpoint():

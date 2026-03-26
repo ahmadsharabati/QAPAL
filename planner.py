@@ -262,6 +262,11 @@ def _format_locators(locators: List[dict], max_items: int = 100, group_by_url: b
                 fb    = chain[1]
                 label += f"\n    fallback: {fb.get('strategy')}({fb.get('value')})"
 
+        # Show <select> option labels so the AI uses valid values
+        opts = ident.get("options")
+        if opts:
+            label += f"\n    options: {opts}"
+
         if not ldata.get("actionable", True):
             label += "\n    [NOT ACTIONABLE]"
         return label
@@ -346,6 +351,20 @@ def _format_semantic_contexts(states: List[dict]) -> str:
                 parts.append(s)
             lines.append(f"  Form inputs:      {' | '.join(parts)}")
         if err: lines.append(f"  Error containers: {', '.join(err[:8])}")
+
+        static = ctx.get("_static_elements", [])
+        notes  = ctx.get("_qa_notes", [])
+        dynamic = ctx.get("_dynamic_elements", {})
+        if static:
+            lines.append(f"  Static elements (NEVER assert these — always present): {', '.join(static[:8])}")
+        if dynamic:
+            if isinstance(dynamic, dict):
+                dyn_parts = [f"{k}: {v}" for k, v in list(dynamic.items())[:6]]
+            else:
+                dyn_parts = list(dynamic[:6])
+            lines.append(f"  Dynamic elements (safe to assert): {', '.join(dyn_parts)}")
+        if notes:
+            lines.append(f"  QA Notes: {' | '.join(notes)}")
     return "\n".join(lines)
 
 
