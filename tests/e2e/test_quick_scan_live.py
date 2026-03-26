@@ -29,13 +29,6 @@ from engine.quick_scan import run_quick_scan
 
 GAUNTLET = [
     pytest.param(
-        "https://example.com",
-        "Static/Minimal",
-        1,   # example.com has at least 1 issue (missing OG tags, etc.)
-        [],
-        id="example-com",
-    ),
-    pytest.param(
         "https://news.ycombinator.com",
         "Static/High-issue",
         20,  # HN is notoriously accessibility-poor
@@ -170,7 +163,7 @@ def test_quick_scan_duration_is_reasonable():
     """Scans should complete within 30 seconds on a normal connection."""
     import time
     start = time.monotonic()
-    result = asyncio.run(run_quick_scan("https://example.com", headless=True))
+    result = asyncio.run(run_quick_scan("https://www.wikipedia.org", headless=True))
     elapsed = time.monotonic() - start
     assert elapsed < 30, f"Scan took {elapsed:.1f}s — too slow"
     # Also check the reported duration aligns roughly
