@@ -1258,9 +1258,6 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
         if not name_lc:
             return None
 
-        # Characters considered trivial (can differ without changing identity)
-        _TRIVIAL = frozenset(" *!?:·•–—")
-
         exact   = None
         partial = None
         for loc in self._db._locs.all():
@@ -1275,15 +1272,8 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
                 exact = {"role": db_role, "name": ident.get("name", "")}
                 break
             if exact is None and partial is None:
-                # Only accept prefix match if the DIFFERENCE is trivial characters
-                if db_name.startswith(name_lc):
-                    diff = db_name[len(name_lc):]
-                    if diff and all(c in _TRIVIAL for c in diff):
-                        partial = {"role": db_role, "name": ident.get("name", "")}
-                elif name_lc.startswith(db_name):
-                    diff = name_lc[len(db_name):]
-                    if diff and all(c in _TRIVIAL for c in diff):
-                        partial = {"role": db_role, "name": ident.get("name", "")}
+                if db_name.startswith(name_lc) or name_lc.startswith(db_name):
+                    partial = {"role": db_role, "name": ident.get("name", "")}
 
         return exact or partial
 

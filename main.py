@@ -1689,6 +1689,13 @@ def main():
     )
     sub = parser.add_subparsers(dest="cmd")
 
+    def _add_device_args(p):
+        """Add --device and --viewport flags to a subparser."""
+        p.add_argument("--device", default=None,
+                       help="Playwright device preset (e.g. 'iPhone 12', 'Pixel 5', 'iPad Pro')")
+        p.add_argument("--viewport", nargs=2, type=int, metavar=("W", "H"),
+                       help="Custom viewport width and height (overrides device default)")
+
     # crawl
     p = sub.add_parser("crawl", help="Crawl pages and populate the locator DB")
     p.add_argument("--urls",  "-u", nargs="+", required=True, help="URLs to crawl")
