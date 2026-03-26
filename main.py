@@ -712,6 +712,549 @@ async def cmd_prd_run(args):
     return 1 if failed else 0
 
 
+# ── Scan command (URL → auto PRD → plan → execute → report) ──────────
+
+_SCAN_PRD_SYSTEM = """\
+You are a senior QA engineer. Your job is to read raw crawl data from a website
+(page inventory, form fields, navigation flows, button labels) and write a
+professional Product Requirements Document (PRD) that describes the site's key
+user flows for test automation.
+
+OUTPUT FORMAT — plain Markdown, no fences:
+
+# <Site Name> Test Plan
+
+## Site Purpose
+One sentence describing what this site does.
+
+## User Flows
+
+### TC1: <Goal-oriented name, e.g. "User can log in">
+**Preconditions:** <what must be true before this test — e.g. "fresh browser, not logged in">
+**Steps:**
+1. Navigate to <url>
+2. <Action on element>
+3. ...
+**Expected Outcomes:**
+- URL changes to <path>
+- <Visible text or element that confirms success>
+
+... (one section per flow)
+
+RULES:
+- Write 6–10 test cases covering real business value (not just "page loads")
+- Every test must be self-contained: include login steps before auth-required flows
+- For multi-step flows (cart → checkout → payment), describe ALL steps in order
+- Expected outcomes must be specific: URL pattern OR visible element, not generic
+- If you see login/register forms: write auth tests first (they unlock other flows)
+- If you see a cart/checkout flow: trace it fully — add item → cart → checkout → confirm
+- If you see search: test search → results → item click
+- Never invent pages or buttons not present in the crawl data
+- For dropdown/submenu navigation: if a category or section link is reachable via a direct
+  URL (visible in Navigation Flows), use navigate(url) rather than clicking a hidden dropdown
+  item — this avoids hover-to-reveal race conditions in automated tests
+- Never test navigation to links that likely go external (e.g. "Documentation", "Blog",
+  social media icons, footer legal links) — these open new tabs and URL assertions fail
+"""
+
+_SCAN_PRD_PROMPT = """\
+## Site URL
+{url}
+
+## Pages Discovered ({page_count} pages)
+{page_inventory}
+
+## Navigation Flows (observed click → URL transitions)
+{nav_flows}
+
+## Interactive Elements Per Page
+{elements_per_page}
+"""
+
+
+def _build_scan_inventory(locator_db, crawl_results: list) -> tuple:
+    """
+    Build three text blocks for the PRD synthesis prompt:
+      - page_inventory:    list of pages with element counts
+      - nav_flows:         page transition descriptions
+      - elements_per_page: forms/buttons/links per page
+    Returns (page_inventory, nav_flows, elements_per_page).
+    """
+    from urllib.parse import urlparse
+
+    crawled_urls = [r["url"] for r in crawl_results if r.get("crawled")]
+    all_locs = locator_db.get_all_locators(valid_only=True)
+
+    # Group locators by page
+    by_url: dict = {}
+    for loc in all_locs:
+        u = loc.get("url", "")
+        if u:
+            by_url.setdefault(u, []).append(loc)
+
+    # Page inventory
+    inv_lines = []
+    for u in crawled_urls[:15]:
+        locs = by_url.get(u, [])
+        roles = {l.get("identity", {}).get("role", "") for l in locs}
+        has_form = bool(roles & {"textbox", "combobox", "searchbox", "checkbox"})
+        has_nav  = bool(roles & {"link"})
+        has_btn  = bool(roles & {"button"})
+        tags = []
+        if has_form: tags.append("form")
+        if has_nav:  tags.append("nav")
+        if has_btn:  tags.append("buttons")
+        inv_lines.append(f"- {u}  [{', '.join(tags) or 'static'}]  ({len(locs)} elements)")
+    page_inventory = "\n".join(inv_lines) or "(none)"
+
+    # Elements per page
+    elem_lines = []
+    for u in crawled_urls[:10]:
+        locs = by_url.get(u, [])
+        if not locs:
+            continue
+        path = urlparse(u).path or "/"
+        elem_lines.append(f"\n### {path}")
+        forms = [l for l in locs if l.get("identity", {}).get("role") in
+                 ("textbox", "combobox", "searchbox", "checkbox")]
+        btns  = [l for l in locs if l.get("identity", {}).get("role") == "button"]
+        links = [l for l in locs if l.get("identity", {}).get("role") == "link"
+                 and l.get("identity", {}).get("container") != "nav"]
+        nav_links = [l for l in locs if l.get("identity", {}).get("role") == "link"
+                     and l.get("identity", {}).get("container") == "nav"]
+        if forms:
+            names = [l.get("identity", {}).get("name", "?") for l in forms[:8]]
+            elem_lines.append(f"  Inputs: {', '.join(n for n in names if n)}")
+        if btns:
+            names = [l.get("identity", {}).get("name", "?") for l in btns[:6]]
+            elem_lines.append(f"  Buttons: {', '.join(n for n in names if n)}")
+        if links:
+            names = [l.get("identity", {}).get("name", "?") for l in links[:6]]
+            elem_lines.append(f"  Links: {', '.join(n for n in names if n)}")
+        if nav_links:
+            def _href(loc):
+                chain = loc.get("locators", {}).get("chain", [])
+                return next((c.get("value", "") for c in chain if c.get("strategy") == "href"), "")
+            nav_parts = []
+            for l in nav_links[:8]:
+                name = l.get("identity", {}).get("name", "?")
+                href = _href(l)
+                if href:
+                    nav_parts.append(f"{name} ({href})")
+                else:
+                    nav_parts.append(name)
+            elem_lines.append(f"  Nav links: {', '.join(nav_parts)}")
+    elements_per_page = "\n".join(elem_lines) or "(no element data)"
+
+    # Nav flows
+    nav_lines = []
+    for u in crawled_urls[:10]:
+        locs = by_url.get(u, [])
+        nav_locs = [l for l in locs if l.get("identity", {}).get("role") == "link"]
+        for loc in nav_locs[:5]:
+            name = loc.get("identity", {}).get("name", "")
+            chain = loc.get("locators", {}).get("chain", [])
+            href = next((c.get("value", "") for c in chain
+                         if c.get("strategy") == "href"), "")
+            if name and href and href.startswith("http"):
+                nav_lines.append(
+                    f"- {urlparse(u).path or '/'} → click \"{name}\" → {urlparse(href).path or '/'}"
+                )
+    nav_flows = "\n".join(nav_lines[:30]) or "(will be populated after first test run)"
+
+    return page_inventory, nav_flows, elements_per_page
+
+
+async def _scan_synthesize_prd(locator_db, url: str, crawl_results: list, ai_client) -> str:
+    """Use AI to write a flow-aware PRD from crawl data. Falls back to element list."""
+    page_inventory, nav_flows, elements_per_page = _build_scan_inventory(
+        locator_db, crawl_results
+    )
+    page_count = sum(1 for r in crawl_results if r.get("crawled"))
+
+    prompt = _SCAN_PRD_PROMPT.format(
+        url=url,
+        page_count=page_count,
+        page_inventory=page_inventory,
+        nav_flows=nav_flows,
+        elements_per_page=elements_per_page,
+    )
+
+    try:
+        model_override = ai_client.small_model if hasattr(ai_client, "small_model") else None
+        prd = await asyncio.to_thread(
+            ai_client.complete,
+            prompt,
+            _SCAN_PRD_SYSTEM,
+            4096,
+            0,
+            model_override,
+        )
+        log.info("   AI-synthesized PRD: %d chars, %d pages analysed", len(prd), page_count)
+        return prd
+    except Exception as exc:
+        log.warning("   PRD synthesis failed (%s), falling back to element list", exc)
+        # Simple fallback
+        crawled_urls = [r["url"] for r in crawl_results if r.get("crawled")]
+        lines = [
+            f"# Smoke Test for {url}", "",
+            "## Test Scope",
+            f"Verify the basic functionality of {url}.", "",
+            "## Test Cases", "",
+            "### TC1: Page loads and core elements are visible",
+            f"- Navigate to {url}",
+            "- Verify the page loads without errors",
+            "- Verify the page title is non-empty",
+        ]
+        all_locs = locator_db.get_all_locators(valid_only=True)
+        nav_links = [l for l in all_locs if l.get("identity", {}).get("role") == "link"
+                     and l.get("identity", {}).get("container") == "nav"]
+        if nav_links:
+            lines += ["", "### TC2: Navigation links are functional",
+                       "- Click primary navigation links and verify pages load"]
+            for link in nav_links[:3]:
+                name = link.get("identity", {}).get("name", "")
+                if name:
+                    lines.append(f"- Navigation link: \"{name}\"")
+        if len(crawled_urls) > 1:
+            lines += ["", "## Discovered Pages"]
+            for page_url in crawled_urls[:10]:
+                page_locs = locator_db.get_all(page_url, valid_only=True)
+                lines.append(f"- {page_url} ({len(page_locs)} elements)")
+        return "\n".join(lines)
+
+
+_SCAN_PRD_EVOLVE_SYSTEM = """\
+You are a senior QA engineer maintaining a living test plan for a website.
+You are given the CURRENT PRD and the LATEST crawl data.
+
+Compare them and update the PRD:
+- If new pages or features were discovered in the crawl → ADD new test cases
+- If existing pages changed (elements added/removed/renamed) → UPDATE affected test cases
+- If a page no longer exists in the crawl data → mark its test case as DEPRECATED (add "[DEPRECATED]" prefix)
+- If nothing changed → return the PRD EXACTLY as-is, character for character
+
+Do NOT remove test cases — only add, update, or mark deprecated.
+Keep the same Markdown format and TC numbering. New test cases get the next available TC number.
+Output the complete updated PRD as plain Markdown, no fences.
+"""
+
+_SCAN_PRD_EVOLVE_PROMPT = """\
+## CURRENT PRD
+{old_prd}
+
+## LATEST CRAWL DATA
+
+### Site URL
+{url}
+
+### Pages Discovered ({page_count} pages)
+{page_inventory}
+
+### Navigation Flows
+{nav_flows}
+
+### Interactive Elements Per Page
+{elements_per_page}
+"""
+
+
+async def _scan_evolve_prd(locator_db, url: str, crawl_results: list, ai_client, old_prd: str) -> str:
+    """Evolve an existing PRD with new crawl data. Returns updated PRD."""
+    page_inventory, nav_flows, elements_per_page = _build_scan_inventory(
+        locator_db, crawl_results
+    )
+    page_count = sum(1 for r in crawl_results if r.get("crawled"))
+
+    prompt = _SCAN_PRD_EVOLVE_PROMPT.format(
+        old_prd=old_prd,
+        url=url,
+        page_count=page_count,
+        page_inventory=page_inventory,
+        nav_flows=nav_flows,
+        elements_per_page=elements_per_page,
+    )
+
+    try:
+        model_override = ai_client.small_model if hasattr(ai_client, "small_model") else None
+        prd = await asyncio.to_thread(
+            ai_client.complete,
+            prompt,
+            _SCAN_PRD_EVOLVE_SYSTEM,
+            4096,
+            0,
+            model_override,
+        )
+        log.info("   AI-evolved PRD: %d chars", len(prd))
+        return prd
+    except Exception as exc:
+        log.warning("   PRD evolution failed (%s), keeping existing PRD", exc)
+        return old_prd
+
+
+async def cmd_scan(args):
+    """Scan a site: crawl, evolve PRD, generate/evolve test plans, output diff.
+
+    Does NOT execute tests. Use `qapal run` for deterministic execution.
+
+    Stateful — each domain gets persistent state at .qapal/<domain>/:
+      - db.json          locator database (crawl data)
+      - prd.md           synthesized PRD (evolves with site)
+      - plans/           proposed test plans (new + adjusted + unchanged)
+
+    Workflow:  scan → review → promote to test suite → run in CI
+    """
+    from generator import TestGenerator
+    from urllib.parse import urlparse
+
+    ai = _get_ai_client()
+    if not ai:
+        log.error("QAPAL_AI_PROVIDER environment variable is required for scan.")
+        return 1
+
+    url = args.url
+    headless_mode   = True if args.headless else None
+    credentials     = _load_credentials(args)
+    device, viewport = _get_device_args(args)
+    depth           = getattr(args, "depth", 2)
+    num_tests       = getattr(args, "num_tests", None)
+    max_locators    = getattr(args, "max_locators", 400)
+    fresh           = getattr(args, "fresh", False)
+
+    # Persistent state per domain — stored in .qapal/<domain>/
+    slug = urlparse(url).netloc.replace(".", "-").replace(":", "-")
+    domain_dir = Path(".qapal") / slug
+    domain_dir.mkdir(parents=True, exist_ok=True)
+    db_path   = domain_dir / "db.json"
+    prd_path  = domain_dir / "prd.md"
+    plans_dir = domain_dir / "plans"
+    plans_dir.mkdir(parents=True, exist_ok=True)
+
+    is_first_run = not db_path.exists()
+
+    if fresh:
+        import shutil
+        if domain_dir.exists():
+            shutil.rmtree(domain_dir)
+            domain_dir.mkdir(parents=True, exist_ok=True)
+            plans_dir.mkdir(parents=True, exist_ok=True)
+        log.info("   --fresh: cleared all state for %s", slug)
+        is_first_run = True
+
+    db = LocatorDB(path=str(db_path))
+    sg = StateGraph(db)
+    t0 = time.monotonic()
+
+    prev_stats = db.stats()
+    prev_locators = prev_stats.get("valid_elements", 0)
+    prev_pages = prev_stats.get("total_pages", 0)
+
+    log.info("\n QAPal Scan: %s", url)
+    log.info("   AI: %s / %s", ai.provider, ai.model)
+    log.info("   State: %s (%s)", domain_dir,
+             "new" if is_first_run else f"cached: {prev_locators} locators, {prev_pages} pages")
+
+    try:
+        # ── Phase 1: Crawl ──────────────────────────────────────────
+        force_crawl = fresh or is_first_run
+        log.info("\n [1/4] Crawling site (depth=%d%s)...",
+                 depth, ", full" if force_crawl else ", incremental")
+        async with Crawler(db, headless=headless_mode, credentials=credentials,
+                           state_graph=sg, device=device, viewport=viewport) as crawler:
+            crawl_results = await crawler.spider_crawl(
+                [url], max_depth=depth, force=force_crawl,
+            )
+
+        crawled_count = sum(1 for r in crawl_results if r.get("crawled"))
+        skipped_count = sum(1 for r in crawl_results if not r.get("crawled"))
+        crawled_urls = list({r["url"] for r in crawl_results if r.get("crawled")} | {url})
+        log.info("   Crawled %d pages%s",
+                 crawled_count,
+                 f" (skipped {skipped_count} cached)" if skipped_count else "")
+
+        # Semantic extraction (only for newly crawled pages)
+        if crawled_urls:
+            headless_bool = headless_mode if headless_mode is not None else True
+            log.info("   Extracting semantic context for %d URL(s)...", len(crawled_urls))
+            processed = await _extract_semantics(db, crawled_urls, headless=headless_bool)
+            log.info("   Semantic contexts saved: %d/%d", processed, len(crawled_urls))
+
+        # ── Phase 2: Evolve PRD ─────────────────────────────────────
+        log.info("\n [2/4] Evolving PRD...")
+        get_token_tracker().reset()
+
+        # Build crawl_results for ALL known pages (cached + fresh)
+        all_crawl_results = crawl_results[:]
+        for page in db.all_pages():
+            page_url = page.get("url", "")
+            if page_url and not any(r["url"] == page_url for r in all_crawl_results):
+                all_crawl_results.append({"url": page_url, "crawled": True})
+
+        old_prd = prd_path.read_text(encoding="utf-8") if prd_path.exists() else None
+
+        if old_prd and crawled_count == 0:
+            # No new pages — PRD stays as-is
+            prd_content = old_prd
+            log.info("   PRD unchanged (no new crawl data)")
+        elif old_prd and crawled_count > 0:
+            # New pages discovered — evolve the PRD
+            prd_content = await _scan_evolve_prd(db, url, all_crawl_results, ai, old_prd)
+            if prd_content.strip() == old_prd.strip():
+                log.info("   PRD unchanged (AI found no new flows)")
+            else:
+                log.info("   PRD updated with new crawl data")
+        else:
+            # First run — synthesize from scratch
+            prd_content = await _scan_synthesize_prd(db, url, all_crawl_results, ai)
+            log.info("   PRD generated (%d chars)", len(prd_content))
+
+        prd_path.write_text(prd_content, encoding="utf-8")
+        log.info("   PRD → %s", prd_path)
+
+        tok = get_token_tracker().format_line("prd")
+        if tok:
+            log.info(tok)
+
+        # ── Phase 3: Evolve test plans ──────────────────────────────
+        log.info("\n [3/4] Generating test plans  [ai: %s]", ai.provider)
+        get_token_tracker().reset()
+
+        # Load existing plans from previous scans
+        existing_plans = []
+        for plan_file in sorted(plans_dir.glob("*.json")):
+            try:
+                with open(plan_file) as f:
+                    existing_plans.append(json.load(f))
+            except (json.JSONDecodeError, OSError):
+                continue
+
+        generator = TestGenerator(db, ai_client=ai, state_graph=sg,
+                                  max_locators=max_locators, num_tests=num_tests)
+
+        if existing_plans:
+            # Incremental: pass existing plans so AI can adjust + add new ones
+            plans = generator.generate_plans_from_prd(
+                _build_incremental_prd(prd_content, existing_plans),
+                [url], credentials=credentials,
+            )
+        else:
+            plans = generator.generate_plans_from_prd(prd_content, [url], credentials=credentials)
+
+        valid_plans = [p for p in plans if not p.get("_planning_error")]
+        if not valid_plans:
+            log.error("No valid plans generated.")
+            return 1
+
+        tok = get_token_tracker().format_line("plan")
+        if tok:
+            log.info(tok)
+
+        # ── Phase 4: Diff & save ────────────────────────────────────
+        log.info("\n [4/4] Plan diff")
+
+        # Build maps for comparison
+        old_by_id = {p.get("test_id", ""): p for p in existing_plans}
+        new_by_id = {p.get("test_id", ""): p for p in valid_plans}
+
+        added    = []
+        modified = []
+        unchanged = []
+
+        for tc_id, plan in new_by_id.items():
+            if tc_id not in old_by_id:
+                added.append(plan)
+            else:
+                # Compare steps + assertions (ignore _meta)
+                old_core = {"steps": old_by_id[tc_id].get("steps"), "assertions": old_by_id[tc_id].get("assertions")}
+                new_core = {"steps": plan.get("steps"), "assertions": plan.get("assertions")}
+                if json.dumps(old_core, sort_keys=True) != json.dumps(new_core, sort_keys=True):
+                    modified.append(plan)
+                else:
+                    unchanged.append(plan)
+
+        deprecated = [old_by_id[tid] for tid in old_by_id if tid not in new_by_id]
+
+        # Save all plans to domain plans dir
+        for p in valid_plans:
+            tc_id = p.get("test_id", "unknown")
+            path = plans_dir / f"{tc_id}.json"
+            with open(path, "w") as f:
+                json.dump(p, f, indent=2)
+
+        # Print diff summary
+        if added:
+            log.info("   ✚ NEW (%d):", len(added))
+            for p in added:
+                log.info("     + %s: %s  (%d steps)",
+                         p.get("test_id"), p.get("name", ""), len(p.get("steps", [])))
+
+        if modified:
+            log.info("   ✎ MODIFIED (%d):", len(modified))
+            for p in modified:
+                log.info("     ~ %s: %s", p.get("test_id"), p.get("name", ""))
+
+        if unchanged:
+            log.info("   ═ UNCHANGED (%d):", len(unchanged))
+            for p in unchanged:
+                log.info("     = %s", p.get("test_id"))
+
+        if deprecated:
+            log.info("   ✖ DEPRECATED (%d):", len(deprecated))
+            for p in deprecated:
+                log.info("     - %s: %s", p.get("test_id"), p.get("name", ""))
+                # Remove deprecated plan files
+                dep_path = plans_dir / f"{p.get('test_id', 'unknown')}.json"
+                if dep_path.exists():
+                    dep_path.unlink()
+
+        # ── Summary ─────────────────────────────────────────────────
+        duration = int((time.monotonic() - t0) * 1000)
+        new_stats = db.stats()
+
+        log.info("\n ─── Scan Summary ───")
+        log.info("   URL:        %s", url)
+        log.info("   Pages:      %d crawled, %d total known", crawled_count, new_stats.get("total_pages", 0))
+        log.info("   Locators:   %d total", new_stats.get("valid_elements", 0))
+        log.info("   Plans:      %d total  (+%d new, ~%d modified, -%d deprecated)",
+                 len(valid_plans), len(added), len(modified), len(deprecated))
+        log.info("   Duration:   %dms", duration)
+        log.info("")
+        log.info("   State:  %s", domain_dir)
+        log.info("   PRD:    %s", prd_path)
+        log.info("   Plans:  %s/*.json", plans_dir)
+        log.info("")
+        log.info("   Next steps:")
+        log.info("     Review:  cat %s", prd_path)
+        log.info("     Run:     python main.py run --plan '%s/*.json'", plans_dir)
+        log.info("     Promote: cp %s/*.json tests/", plans_dir)
+
+        return 0
+
+    finally:
+        db.close()
+
+
+def _build_incremental_prd(prd_content: str, existing_plans: list) -> str:
+    """Append existing test summaries to PRD so the AI knows what's already covered."""
+    lines = [prd_content, "", "---", "",
+             "## EXISTING TESTS (already generated — adjust if needed, add new ones for gaps)", ""]
+    for p in existing_plans:
+        tc_id = p.get("test_id", "?")
+        name = p.get("name", "")
+        steps = p.get("steps", [])
+        step_summary = " → ".join(
+            s.get("action", "?") + (" " + s.get("url", "") if s.get("action") == "navigate" else "")
+            for s in steps[:5]
+        )
+        assertions = p.get("assertions", [])
+        assert_summary = ", ".join(a.get("type", "?") for a in assertions[:3])
+        lines.append(f"- **{tc_id}**: {name}")
+        lines.append(f"  Steps: {step_summary}")
+        if assert_summary:
+            lines.append(f"  Asserts: {assert_summary}")
+    return "\n".join(lines)
+
+
 # ── Compile command ───────────────────────────────────────────────────
 
 async def cmd_compile(args):
@@ -1327,6 +1870,22 @@ def main():
                    help="Also generate standalone pytest-playwright .py files")
     _add_device_args(p)
 
+    # scan
+    p = sub.add_parser("scan", help="Scan a site: crawl → evolve PRD → generate plans → diff (no execution)")
+    p.add_argument("--url", "-u", required=True, help="Site URL to scan")
+    p.add_argument("--fresh", action="store_true",
+                   help="Clear all cached state and start from scratch")
+    p.add_argument("--headless", "-H", action="store_true", help="Run browser in headless mode")
+    p.add_argument("--depth", type=int, default=2, metavar="N",
+                   help="Max spider crawl depth (default: 2)")
+    p.add_argument("--num-tests", dest="num_tests", type=int, default=None, metavar="N",
+                   help="Number of test cases to generate (default: AI decides, 6-10)")
+    p.add_argument("--max-locators", dest="max_locators", type=int, default=400, metavar="N",
+                   help="Max locators sent to AI (default: 400)")
+    p.add_argument("--credentials-file", dest="credentials_file", metavar="FILE",
+                   help="JSON file with login credentials (url, username, password, selectors)")
+    _add_device_args(p)
+
     # compile
     p = sub.add_parser("compile", help="Compile locator DB into a compact compiled_model.json")
     p.add_argument("--output", "-o", default="compiled_model.json",
@@ -1433,6 +1992,8 @@ def main():
             return asyncio.run(cmd_run(args))
         elif args.cmd == "prd-run":
             return asyncio.run(cmd_prd_run(args))
+        elif args.cmd == "scan":
+            return asyncio.run(cmd_scan(args))
         elif args.cmd == "status":
             return asyncio.run(cmd_status(args))
         elif args.cmd == "graph":

@@ -6,6 +6,7 @@ execution plans in a single AI call.
 """
 
 import json
+import os
 import re
 from datetime import datetime, timezone
 from typing import List, Optional, Set
@@ -20,69 +21,220 @@ from _tokens import get_token_tracker
 log = get_logger("generator")
 
 
-_GENERATOR_SYSTEM = """You are a test automation engineer for QAPal, a deterministic UI test automation system.
+_GENERATOR_SYSTEM = """/no_think
+You are a senior QA automation engineer. Your ONLY job is to generate test plans that CATCH REAL BUGS.
 
-Your job: read a human-written Product Requirements Document (PRD) and a list of available UI element locators, and generate a set of deterministic test execution plans.
+A test that passes even when the feature is BROKEN is WORTHLESS. Reject any assertion that does not verify a state change.
 
-RULES:
-1. Parse the PRD, identify test scenarios, generate steps and assertions.
-2. EVERY step is explicit. NO conditional logic. Plans are 100% deterministic.
-3. Hidden elements (dropdown/modal): first click the trigger to reveal them.
-4. Pre-existing elements: use exact locator from Available Locators + element_id. Dynamic elements: use role or text strategy — NEVER css.
-5. ARIA roles: button→"button", a[href]→"link", input[text/email/password]→"textbox", input[checkbox]→"checkbox", select→"combobox".
-6. Return valid JSON only — no markdown, no explanation.
-7. NAVIGATION URLS: always absolute (e.g. "https://app.com/login"). NEVER relative.
-8. ASSERTION ACCURACY — derive post-action URL from Navigation Graph (highest-count edge). If NO outgoing edge exists for the action, assert url_contains the CURRENT path or assert element_visible. NEVER invent URLs.
-9. FORM COMPLETENESS: fill ALL fields shown in Available Locators. Use verbatim text values — no styling symbols like ~ or *.
-10. DYNAMIC IDs: NEVER navigate to a URL containing a ULID/UUID you did not copy from Base URLs, Nav Graph, or Locators.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ THE ONE RULE THAT OVERRIDES EVERYTHING ELSE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-SELECTOR FORMAT:
-  RULE A — If the Available Locators entry shows a `primary: testid(...)` for an element, you MUST use
-            that testid. Do NOT make up a name and use role if a testid exists in the locator list.
-  RULE B — Elements shown as `button (in form)` or `button` with NO quoted name have an empty accessible
-            name. You CANNOT locate them with `role+name`. You MUST use their testid.
-  RULE C — testid strategy ONLY for values that appear verbatim in Available Locators. NEVER invent testid values.
-  RULE F — NEVER use any locator marked [NOT ACTIONABLE] in Available Locators. These elements cannot be interacted with (e.g. mobile-only buttons hidden at desktop). Skip them entirely and use alternative locators or navigation.
-  RULE D — List/card items: use testid_prefix when Available Locators shows "[LIST xN] testid_prefix(...)".
-            {"strategy":"testid_prefix","value":"product-","index":0} = first card; index=1 = second.
+SELF-CHECK: Before writing each assertion, ask: "Would this assertion PASS if the feature I'm testing was completely broken?"
+  → YES → the assertion is useless. Replace it with one that fails when the feature breaks.
+  → NO  → the assertion is valid. Keep it.
+
+Examples of this self-check:
+  "element_exists on a product card after sorting" → Would it pass if sort was broken? YES. Products existed before. USELESS.
+  "javascript checking prices[0] <= prices[1]" → Would it pass if sort was broken? NO. Prices could be [50, 10]. VALID.
+  "element_exists on a product after filtering" → Would it pass if filter was broken? YES. Products were there before. USELESS.
+  "element_checked on the brand filter checkbox" → Would it pass if filter was broken? NO. Checkbox stays unchecked. VALID.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ MANDATORY ASSERTION RULES BY TEST TYPE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+◆ SORT TESTS — REQUIRED assertions (both mandatory):
+  1. element_count on product items with operator "at_least" and count 1  (products rendered)
+  2. javascript assertion that compares the first and second item's price/name to verify ORDER changed
+     Script pattern: "(() => { const items = [...document.querySelectorAll('[data-test^=product-]')]; const vals = items.map(el => parseFloat(el.textContent.match(/\\d+\\.\\d+/)?.[0] || '999')).filter(n => n > 0); return vals.length >= 2 && vals[0] <= vals[1]; })()"
+  ✗ NEVER use element_exists or element_visible as the only assertion for sort tests
+  ✗ NEVER use element_value_equals on the sort dropdown — its internal value differs from the label text
+
+◆ FILTER TESTS (brand/category/checkbox) — REQUIRED assertions (both mandatory):
+  1. element_checked on the filter checkbox that was clicked
+  2. element_count on result items with operator "less_than" and a realistic unfiltered count (use 9 for ~9 unfiltered products)
+     OR element_text_contains on a result count label if Semantic Context shows one
+  ✗ NEVER use element_exists alone — products existed before filtering
+
+◆ SEARCH TESTS — REQUIRED assertions (all three mandatory):
+  1. element_count on result items with operator "at_least" and count 1
+  2. element_text_contains on the FIRST result item verifying it contains part of the search term
+  3. element_value_equals or element_value_contains on the search input (query was retained)
+  ✗ NEVER assert element_exists on a product that existed before the search
+
+◆ FORM SUBMISSION TESTS — REQUIRED assertions:
+  1. Check Semantic Context "error_containers" for the real dynamic notification element.
+     ONLY use an error_container selector if it is NOT listed in "_static_elements".
+     If no dynamic error container exists: assert url_contains on the current page path.
+  2. element_text_contains on the dynamic notification with a key word (e.g. "Invalid", "success")
+     ONLY if the error_container is confirmed dynamic (not in _static_elements).
+  ✗ NEVER assert url_contains if the URL does not change (confirm from Navigation Graph first)
+  ✗ NEVER assert element_visible on the submit button (it may disappear after clicking)
+  ✗ NEVER use a selector from "_static_elements" to verify form submission outcome
+
+◆ QUANTITY / COUNTER TESTS — REQUIRED:
+  1. element_value_equals on the quantity input with the EXACT expected number (e.g. "2" after increment)
+  ✗ NEVER assert element_disabled on quantity buttons — behavior varies widely between sites
+
+◆ NAVIGATION / LINK TESTS — REQUIRED (both mandatory):
+  1. url_contains on the target path (from Navigation Graph)
+  2. element_text_contains or element_visible on a page heading confirming the destination
+  ✗ A test that ONLY navigates and checks the URL is NOT worth generating
+
+◆ LOGIN TESTS (no real credentials provided):
+  1. element_visible on the login form container (form stays visible because credentials are fake/wrong)
+  ✗ NEVER assert URL change or element_hidden on "Sign in" — login WILL FAIL with placeholder credentials
+
+◆ REGISTRATION TESTS (no real credentials provided):
+  1. If Navigation Graph shows /register → /login redirect: assert url_contains "/auth/login"
+  2. If no redirect shown: assert url_contains on current path + element_visible on form
+  3. Use a realistic but fake email: "test_qa_20260326@mailtest.dev"
+  ✗ NEVER assert element_hidden on form elements after registration
+
+◆ PRODUCT DETAIL / CONTENT TESTS — REQUIRED:
+  1. url_contains with the product URL path
+  2. element_visible or element_text_contains on the product name/title
+  3. element_visible on the price element
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ TEST VARIETY — WHAT TO GENERATE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+For each PRD user flow, generate:
+  (A) One HAPPY PATH test — the expected successful flow with behavioral outcome assertions
+  (B) One VALIDATION / EDGE CASE test — IF the flow has a form or state-dependent behavior:
+      - Form validation: submit with empty required fields → assert validation error appears
+      - Counter edge case: decrement quantity to minimum → assert value stays at "1"
+      - Search with no results: search for a nonsense string → assert empty state or count=0
+      - Filter combination: apply two filters → assert both checkboxes checked + count reduced
+
+DO NOT generate tests that:
+  - Only navigate to a URL and assert that URL (trivial, catches nothing)
+  - Only click a link and assert the destination URL (trivial navigation test)
+  - Duplicate another test's steps and assertions with minor name variations
+  - Assert that elements exist which were already there before any action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PLAN STRUCTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Every step is explicit. NO conditional logic. Plans are 100% deterministic.
+2. Hidden elements (dropdown/modal): first click the trigger to reveal them.
+3. Return valid JSON only — no markdown fences, no explanation.
+4. Every plan must be self-contained, runnable from a fresh browser with no prior state.
+   - Cart-dependent pages: add items to cart first.
+   - Wizard flows: include ALL preceding steps from step 1.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ URLS & NAVIGATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5. NAVIGATION URLS: always absolute. NEVER relative.
+   Navigate directly to pages with known URLs — do NOT click through menus to reach them.
+6. DYNAMIC IDs: NEVER navigate to a URL containing a ULID/UUID not copied from Base URLs/Nav Graph/Locators.
+7. URL assertions: ONLY assert url_contains with paths confirmed in Navigation Graph or Base URLs.
+   NEVER guess redirect URLs after form submission.
+8. For SPAs (Angular, React, Vue): prefer element_visible / element_text_contains over url_contains.
+   SPAs often don't change the URL on clicks or searches.
+9. NEVER assert element_hidden unless certain the element disappears.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ SELECTORS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ARIA roles: button→"button", a[href]→"link", input[text/email/password]→"textbox", input[checkbox]→"checkbox", select→"combobox".
+
+  RULE A — If Available Locators shows `primary: testid(...)`, MUST use that testid. Do NOT use role if testid exists.
+  RULE B — Elements with NO quoted name (empty accessible name): MUST use their testid. Cannot use role+name.
+  RULE C — testid values ONLY from verbatim Available Locators. NEVER invent testid values.
+  RULE D — List/card items: use testid_prefix when locators show "[LIST xN] testid_prefix(...)".
+            {"strategy":"testid_prefix","value":"product-","index":0} = first card; index:1 = second.
             NEVER use role+name for cards (names contain dynamic prices/ratings).
-  RULE E — NEVER navigate to a URL with a dynamic ID (ULID/UUID) not copied from Base URLs/Nav Graph/Locators.
+  RULE E — NEVER navigate to a URL with a dynamic ID not from Base URLs/Nav Graph/Locators.
+  RULE F — NEVER use locators marked [NOT ACTIONABLE].
 
-LOCATOR EXAMPLES:
+LOCATOR FORMATS:
   {"strategy":"testid","value":"login-submit"}
   {"strategy":"testid_prefix","value":"product-","index":0}
   {"strategy":"role","value":{"role":"button","name":"Login"}}
   {"strategy":"role","value":{"role":"textbox","name":"Email address *"}}
-  {"strategy":"text","value":"Buy milk"}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ACTIONS & FORMS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 SUPPORTED ACTIONS: navigate, click, fill, type, clear, press, select, check, uncheck, hover, focus, scroll, wait
+WAIT ACTION: use "duration" (milliseconds) — NOT "timeout". E.g. {"action":"wait","duration":3000}
+SELECT: use "label" (visible text), not internal "value". E.g. "label":"Germany" not "value":"DE".
+FORM COMPLETENESS: fill ALL required fields. Use verbatim text — no styling symbols like ~ or *.
+  Skip optional file upload fields (type=file / "attachment" / "upload" in name) — NEVER fill these.
+  For select/combobox: use EXACT label from "options" in Available Locators.
+AUTHENTICATED FLOWS: navigate login → fill email → fill password → click submit (explicit click required).
 
-SELECT: use "label" (visible text), not "value" (HTML attribute). E.g. "label":"Germany" not "value":"DE".
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ UNIVERSAL RULES — APPLY TO EVERY SITE, EVERY TEST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-AUTHENTICATED FLOWS: tests requiring login MUST start with: navigate login page → fill email → fill password → click submit.
+① SUBMIT CLICK IS ALWAYS EXPLICIT
+  Forms are NEVER submitted by filling fields alone. The LAST step of any form test MUST be:
+    {"action":"click","selector":{"strategy":"testid","value":"<submit-testid>"}}
+  This applies to: login, register, contact, search, checkout, forgot-password — every form.
 
-PREREQUISITE STATES: Every plan must be fully self-contained and runnable from a fresh browser with no prior state.
-  - If a page requires items in a cart (e.g. /checkout, /order), include: navigate to a product page → click add-to-cart BEFORE navigating to that page.
-  - If a page requires a completed prior step in a wizard (e.g. step 3 of 4), include ALL preceding steps from step 1.
-  - Never navigate directly to a mid-flow URL (checkout, confirmation, payment) without completing the prerequisite steps.
+② SORT/FILTER REQUIRE A WAIT STEP (SPAs re-render asynchronously)
+  After any select/check that triggers a list re-render, add BEFORE the assertions:
+    {"action":"wait","duration":3000}
 
-SUPPORTED ASSERTION TYPES:
-  url_equals, url_contains, element_exists, element_visible, element_hidden,
-  element_contains_text, element_text_equals, element_value_equals
+③ NEVER ASSERT SEARCH INPUT VALUE AFTER PRESSING ENTER
+  SPA frameworks (Angular/React/Vue) navigate on search submit and clear the input field.
+  element_value_equals on a search box after pressing Enter will ALWAYS fail on SPAs.
+
+④ NEVER USE BARE CSS TAG SELECTORS IN ASSERTIONS
+  Forbidden: "h1", "h2", "p", ".price", ".title", ".name", "span", "div", "form", "a"
+  These are fragile. Use only: testid, role+name, or explicit data-attribute CSS selectors
+  like [data-test="quantity"], [data-test="login-error"].
+
+⑤ STATIC ELEMENTS ARE USELESS FOR ASSERTIONS
+  Any element visible before AND after your action cannot prove your action worked.
+  Check Semantic Context for "_static_elements" — these are always present (e.g. nav bars,
+  documentation banners) and must NEVER be used to verify an action succeeded.
+  Specifically: if an element appears in "_static_elements", do NOT assert its text.
+
+⑥ NEVER FILL FILE UPLOAD INPUTS
+  Inputs of type=file require OS file picker — they cannot be filled with text.
+  Skip any field whose name contains "attachment", "upload", "file", or whose type is "file".
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ FULL ASSERTION CATALOG — USE ALL TYPES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+URL:        url_equals, url_contains
+PAGE:       title_contains
+EXISTENCE:  element_exists, element_not_exists
+COUNT:      element_count  → {"type":"element_count","selector":{...},"count":9,"operator":"less_than"}
+            operators: "equals" | "at_least" | "at_most" | "greater_than" | "less_than"
+VISIBILITY: element_visible, element_hidden
+STATE:      element_enabled, element_disabled, element_checked, element_unchecked
+CONTENT:    element_text_equals, element_text_contains, element_value_equals, element_value_contains
+ATTRIBUTE:  element_attribute  → {"type":"element_attribute","selector":{...},"attribute":"href","value":"/docs"}
+CUSTOM:     javascript  → {"type":"javascript","script":"<expression that returns true/false>"}
+            USE FOR: sort order, price range verification, counting DOM nodes, reading computed values
 """
 
-_GENERATOR_PROMPT = """## Base URLs (use these as the root for all navigate actions)
+_GENERATOR_PROMPT = """## Base URLs
 {base_urls}
 
-## Test Credentials (use these exact values for login/registration test steps)
+## Test Credentials
 {credentials_section}
 
 ## Product Requirements Document
 {prd_content}
 
-## Semantic Context (page structure, form fields, error containers)
-NOTE: "Form inputs" lists every fillable field and its testid. "Error containers" are selectors
-where validation errors appear — use these for element_visible assertions in error-path tests.
+## Semantic Context
+MINE THIS for assertions:
+  - "error_containers": selectors where success/error messages appear → use for element_visible after form submit
+  - "form_inputs": every field and its testid → use for element_value_equals after filling
+  - "headings": page headings → use for element_text_contains to confirm you're on the right page
 {semantic_contexts}
 
 ## Navigation Graph
@@ -92,24 +244,94 @@ where validation errors appear — use these for element_visible assertions in e
 {locators}
 
 ## Output Format
-Return a JSON array of execution plans exactly like this — no markdown fences:
+Return a JSON array — no markdown fences, no explanation.
+
+REFERENCE EXAMPLES (these show what GOOD assertions look like — adapt selectors to the actual locators above):
+
 [
   {{
-    "test_id": "TC001_login",
-    "name": "User can log in successfully",
+    "test_id": "TC_ex_sort_price_low_high",
+    "name": "Sort by Price Low-High reorders product list correctly",
     "steps": [
-      {{"action": "navigate", "url": "https://..."}},
-      {{
-        "action": "fill",
-        "selector":  {{"strategy": "role", "value": {{"role": "textbox", "name": "Email address *"}}}},
-        "value": "user@example.com"
-      }}
+      {{"action": "navigate", "url": "https://example.com/category/hand-tools"}},
+      {{"action": "select", "selector": {{"strategy": "testid", "value": "sort"}}, "label": "Price (Low - High)"}}
     ],
     "assertions": [
-      {{"type": "url_contains", "value": "/dashboard"}}
+      {{"type": "element_count", "selector": {{"strategy": "testid_prefix", "value": "product-"}}, "count": 1, "operator": "at_least"}},
+      {{"type": "javascript", "script": "(() => {{ const cards = [...document.querySelectorAll('[data-test^=product-]')]; const prices = cards.map(c => parseFloat(c.textContent.match(/\\\\d+\\\\.\\\\d+/)?.[0]||'999')).filter(n=>n>0); return prices.length >= 2 && prices[0] <= prices[1]; }})()"}}
+    ]
+  }},
+  {{
+    "test_id": "TC_ex_filter_brand",
+    "name": "Filter by first brand reduces visible products and keeps checkbox checked",
+    "steps": [
+      {{"action": "navigate", "url": "https://example.com/category/power-tools"}},
+      {{"action": "check", "selector": {{"strategy": "testid_prefix", "value": "brand-", "index": 0}}}}
+    ],
+    "assertions": [
+      {{"type": "element_checked", "selector": {{"strategy": "testid_prefix", "value": "brand-", "index": 0}}}},
+      {{"type": "element_count", "selector": {{"strategy": "testid_prefix", "value": "product-"}}, "count": 9, "operator": "less_than"}}
+    ]
+  }},
+  {{
+    "test_id": "TC_ex_search_hammer",
+    "name": "Searching for Hammer returns relevant results with query retained",
+    "steps": [
+      {{"action": "navigate", "url": "https://example.com"}},
+      {{"action": "fill", "selector": {{"strategy": "testid", "value": "search-query"}}, "value": "Hammer"}},
+      {{"action": "press", "selector": {{"strategy": "testid", "value": "search-query"}}, "key": "Enter"}}
+    ],
+    "assertions": [
+      {{"type": "element_count", "selector": {{"strategy": "testid_prefix", "value": "product-"}}, "count": 1, "operator": "at_least"}},
+      {{"type": "element_text_contains", "selector": {{"strategy": "testid_prefix", "value": "product-", "index": 0}}, "value": "Hammer"}},
+      {{"type": "element_value_equals", "selector": {{"strategy": "testid", "value": "search-query"}}, "value": "Hammer"}}
+    ]
+  }},
+  {{
+    "test_id": "TC_ex_contact_form",
+    "name": "Contact form submission shows success notification",
+    "steps": [
+      {{"action": "navigate", "url": "https://example.com/contact"}},
+      {{"action": "fill", "selector": {{"strategy": "testid", "value": "first-name"}}, "value": "Alice"}},
+      {{"action": "fill", "selector": {{"strategy": "testid", "value": "last-name"}}, "value": "Smith"}},
+      {{"action": "fill", "selector": {{"strategy": "testid", "value": "email"}}, "value": "alice@mailtest.dev"}},
+      {{"action": "select", "selector": {{"strategy": "testid", "value": "subject"}}, "label": "Customer service"}},
+      {{"action": "fill", "selector": {{"strategy": "testid", "value": "message"}}, "value": "This is a test message for QA purposes."}},
+      {{"action": "click", "selector": {{"strategy": "testid", "value": "contact-submit"}}}}
+    ],
+    "assertions": [
+      {{"type": "element_visible", "selector": {{"strategy": "css", "value": "[data-test='notification-bar']"}}}},
+      {{"type": "element_text_contains", "selector": {{"strategy": "css", "value": "[data-test='notification-bar']"}}, "value": "Thank"}}
+    ]
+  }},
+  {{
+    "test_id": "TC_ex_quantity_increment",
+    "name": "Incrementing product quantity updates the value to 2",
+    "steps": [
+      {{"action": "navigate", "url": "https://example.com/product/KNOWN_ID"}},
+      {{"action": "click", "selector": {{"strategy": "testid", "value": "increase-quantity"}}}}
+    ],
+    "assertions": [
+      {{"type": "element_value_equals", "selector": {{"strategy": "testid", "value": "quantity"}}, "value": "2"}}
+    ]
+  }},
+  {{
+    "test_id": "TC_ex_search_no_results",
+    "name": "Searching for a nonsense term returns zero results",
+    "steps": [
+      {{"action": "navigate", "url": "https://example.com"}},
+      {{"action": "fill", "selector": {{"strategy": "testid", "value": "search-query"}}, "value": "xzxzxzxz_no_match"}},
+      {{"action": "press", "selector": {{"strategy": "testid", "value": "search-query"}}, "key": "Enter"}}
+    ],
+    "assertions": [
+      {{"type": "element_count", "selector": {{"strategy": "testid_prefix", "value": "product-"}}, "count": 0, "operator": "equals"}}
     ]
   }}
-]"""
+]
+
+FINAL REMINDER — apply SELF-CHECK to every assertion before writing it:
+  "Would this assertion PASS if the feature was completely broken?"
+  → If YES: replace it. → If NO: keep it."""
 
 _VALIDATOR_PROMPT = """\
 You are a QA automation validator. You will be given a test plan (JSON) and a list of available
@@ -121,7 +343,7 @@ Rules:
 - Output ONLY the corrected plan as a single valid JSON object. No prose, no markdown fences.
 - Preserve all fields (test_id, name, steps, assertions, _meta, etc.) exactly — only update selectors.
 - If a selector already matches a locator in the list, leave it unchanged.
-- Prefer `testid` strategy when a matching testid is available; otherwise use `role`.
+- Prefer `role` or `label` strategy over `testid` when available — testid attributes require JavaScript to execute first and may not be present at page load; role/label selectors are stable from initial render.
 - If no reasonable match exists, keep the original selector unchanged.
 
 PLAN:
@@ -421,7 +643,14 @@ class TestGenerator:
                 "  (Use these exact values in test steps that perform login)"
             )
         else:
-            creds_section = "  (no credentials provided — use placeholder values for login tests)"
+            creds_section = (
+                "  (no credentials provided — use placeholder values for form fields)\n"
+                "  IMPORTANT: Login will FAIL with placeholder credentials. For login tests:\n"
+                "    - Fill email and password with placeholders, click submit\n"
+                "    - Assert that the login FORM is visible (element_visible on the form/page)\n"
+                "    - Do NOT assert successful login (no url change, no element_hidden 'Sign in')\n"
+                "  For registration tests: fill all fields, click submit, assert element_visible on the form"
+            )
 
         # Use compiled model when available and fresh — dramatically reduces token usage
         compiled_locators_text = None
@@ -448,7 +677,10 @@ class TestGenerator:
         )
 
         try:
-            plan_max_tokens = 4096 if compiled_locators_text else 8192
+            # Scale max_tokens based on requested test count (~500 tokens per test case)
+            base_tokens = 4096 if compiled_locators_text else 8192
+            n_tests = self._num_tests or 5
+            plan_max_tokens = max(base_tokens, n_tests * 500)
             raw = self._ai.complete(prompt, system_prompt=_GENERATOR_SYSTEM, max_tokens=plan_max_tokens, temperature=0)
         except Exception as e:
             raise PlanningError(f"AI call failed: {e}")
@@ -643,38 +875,41 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
         transitions = self._state_graph.all_transitions()
         current_url = ""
         nav_graph_resolved = False  # True only when a click matched a nav graph transition
-        last_click_role = ""        # role of the last clicked element (button vs link)
+        nav_graph_lost = False      # True once we lose nav-graph tracking (sticky)
 
         for step in steps:
             action = step.get("action", "")
             if action == "navigate":
                 current_url = step.get("url", current_url)
-                nav_graph_resolved = True  # navigate steps give us a known URL
-                last_click_role = ""
+                nav_graph_resolved = True
+                nav_graph_lost = False  # navigate resets tracking
             elif action == "click" and current_url:
                 sel   = step.get("selector", {})
                 val   = sel.get("value", "")
-                # Derive the click label from the selector (testid value or role name).
-                # Also handle AI outputting "name" at the selector top level.
-                if sel.get("strategy") in ("testid", "testid_prefix"):
+                strategy = sel.get("strategy", "")
+                # Derive the click label from the selector
+                if strategy in ("testid", "testid_prefix"):
                     click_label = str(val)
-                    last_click_role = ""  # testid: role unknown, treat as action (stay on page)
+                    # Look up actual role from DB — buttons are actions (stay on page),
+                    # links/unknown navigate (may change URL)
+                    click_role = self._lookup_testid_role(str(val), current_url)
                 elif isinstance(val, dict):
                     click_label = str(val.get("name", "") or val.get("role", ""))
-                    last_click_role = str(val.get("role", "")).lower()
+                    click_role = str(val.get("role", "")).lower()
                 elif not val and sel.get("name"):
                     click_label = str(sel.get("name", ""))
-                    last_click_role = ""
+                    click_role = ""
                 else:
                     click_label = str(val)
-                    last_click_role = ""
-                # When click_label contains a dynamic ID (e.g. product-01KKF...), strip
-                # it to match nav graph entries that may have a different ULID.
+                    click_role = ""
+
+                # If we already lost nav-graph tracking, don't try to resolve further
+                if nav_graph_lost:
+                    continue
+
                 click_prefix = self._strip_dynamic_id(click_label)
                 norm_cur = _normalize_url(current_url)
-                # Find a matching nav graph transition from the current URL.
-                # Match by: (a) trigger label text, (b) trigger selector value (testid),
-                # (c) prefix when click_label contains a dynamic ID.
+
                 def _trig_sel_val(t):
                     return str((t.get("trigger", {}).get("selector") or {}).get("value", ""))
 
@@ -695,15 +930,15 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
                     current_url = best["to_url"]
                     nav_graph_resolved = True
                 else:
-                    # No nav graph transition found for this click.
-                    # For link clicks with no nav graph transition: nav graph may be
-                    # incomplete for this destination — trust the AI's assertion.
-                    # For button clicks or unknown-role elements: element is an action
-                    # (doesn't navigate), so current_url is the correct assertion target.
-                    if last_click_role == "link":
-                        nav_graph_resolved = False  # trust AI for navigation links
-                    else:
-                        nav_graph_resolved = True   # current_url is the correct URL
+                    # No nav graph transition — we've lost tracking.
+                    # Once lost, it stays lost until the next navigate step.
+                    # This prevents button clicks after an unresolved navigation
+                    # from incorrectly re-asserting the old URL.
+                    if click_role in ("link", "") or strategy in ("testid", "testid_prefix"):
+                        nav_graph_resolved = False
+                        nav_graph_lost = True
+                    # Button clicks (actions, not navigation) don't lose tracking
+                    # but also don't update the URL
 
         if not current_url:
             return plan
@@ -722,19 +957,20 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
                 aval_stripped = self._strip_dynamic_id(aval)
                 url_stripped  = self._strip_dynamic_id(current_url)
                 # Check if asserted value is consistent with the tracked URL.
-                # Only override if the nav graph actually resolved the destination URL —
-                # if the last click had no matching transition, the nav graph is incomplete
-                # and we must trust the AI's assertion rather than replacing it with a
-                # stale URL from an earlier step.
-                if nav_graph_resolved and aval_stripped not in url_stripped and url_stripped not in aval_stripped:
+                # Only override if the nav graph fully tracked the destination URL
+                # through all steps. If tracking was lost (unresolved click), trust AI.
+                if nav_graph_resolved and not nav_graph_lost and aval_stripped not in url_stripped and url_stripped not in aval_stripped:
                     # Replace with url_contains of the expected (generic) path
                     fixed.append({**a, "type": "url_contains", "value": curr_path,
                                    "_auto_fixed": True, "_original_value": aval})
                     continue
-                # Assertion is consistent but might contain a stale/exact ULID — use
-                # the generic prefix so the assertion works for any dynamic ID instance.
+                # Assertion contains a dynamic ID (ULID/UUID) — strip it to a generic
+                # prefix so the assertion works for any instance.
                 if _DYNAMIC_ID_RE.search(aval):
-                    fixed.append({**a, "type": "url_contains", "value": curr_path,
+                    # When nav graph lost tracking, use the AI's own path (stripped)
+                    # instead of the stale tracked URL.
+                    path_to_use = self._strip_dynamic_id(urlparse(aval).path) if nav_graph_lost else curr_path
+                    fixed.append({**a, "type": "url_contains", "value": path_to_use,
                                    "_auto_fixed": True, "_original_value": aval})
                     continue
                 # url_equals is too strict — query strings / hashes can be appended by
@@ -946,40 +1182,114 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
 
     def _fix_selector_strategies(self, plans: list) -> list:
         """
-        Post-processor: replace `testid` / `testid_prefix` selectors on sites that
-        have no data-testid attributes in the locator DB.
+        Post-processor: replace `testid` / `testid_prefix` selectors with stable
+        role/label/placeholder alternatives when available in the locator DB chain.
 
-        On plain-HTML sites (e.g. books.toscrape.com) the AI hallucinates testid
-        selectors because the locator prompt doesn't clearly signal that testid is
-        absent. This post-processor detects the absence globally and replaces every
-        testid-strategy selector with the best matching `role` selector from the DB.
+        Two cases handled:
+          1. Hallucinated testid: not in DB at all → replace via keyword search
+          2. Real testid with stable alternative: in DB but the same locator has
+             a label/placeholder/role chain entry → prefer semantic selector over testid
+             (handles Angular/React apps where data-testid is only set after JS bootstrap)
         """
         if not self._db:
             return plans
 
-        # Check whether any crawled locator on this site has a testid chain entry.
-        # If even one exists, the AI's testid usage is intentional — leave plans alone.
-        has_testid = any(
-            any(c.get("strategy") == "testid" for c in loc.get("locators", {}).get("chain", []))
-            for loc in self._db._locs.all()
-        )
-        if has_testid:
-            return plans
+        # Build the set of testid values that actually exist in the locator DB,
+        # and a map from testid value → locator entry (for chain inspection).
+        known_testids: set = set()
+        known_prefixes: set = set()
+        testid_to_loc: dict = {}   # testid_value → first locator entry with that testid
+        for loc in self._db._locs.all():
+            for c in loc.get("locators", {}).get("chain", []):
+                if c.get("strategy") == "testid":
+                    val = c.get("value", "")
+                    known_testids.add(val)
+                    testid_to_loc.setdefault(val, loc)
+                elif c.get("strategy") == "testid_prefix":
+                    known_prefixes.add(c.get("value", ""))
+
+        def _is_hallucinated(sel: dict) -> bool:
+            strategy = sel.get("strategy", "")
+            value = sel.get("value", "")
+            if strategy == "testid":
+                return str(value) not in known_testids
+            if strategy == "testid_prefix":
+                return str(value) not in known_prefixes
+            return False
+
+        def _stable_alternative(sel: dict) -> Optional[dict]:
+            """
+            For a testid that IS in the DB, return the best stable alternative
+            from the same locator's chain (label > placeholder > role).
+            Returns None if no stable alternative exists (keep testid as-is).
+            """
+            if sel.get("strategy") != "testid":
+                return None
+            value = str(sel.get("value", ""))
+            loc = testid_to_loc.get(value)
+            if not loc:
+                return None
+            chain = loc.get("locators", {}).get("chain", [])
+            for c in chain:
+                if c.get("strategy") == "label" and c.get("value"):
+                    return {"strategy": "label", "value": c["value"], "_auto_fixed": True}
+            for c in chain:
+                if c.get("strategy") == "placeholder" and c.get("value"):
+                    return {"strategy": "placeholder", "value": c["value"], "_auto_fixed": True}
+            for c in chain:
+                if c.get("strategy") in ("role", "role_container"):
+                    val = c.get("value", {})
+                    role_name = (
+                        c.get("name")
+                        or (val.get("name") if isinstance(val, dict) else None)
+                    )
+                    role_str = val.get("role", "") if isinstance(val, dict) else str(val)
+                    if role_name:
+                        return {"strategy": "role",
+                                "value": {"role": role_str, "name": role_name},
+                                "_auto_fixed": True}
+            return None
+
+        def _get_replacement(sel: dict, url: str) -> Optional[dict]:
+            if _is_hallucinated(sel):
+                # Hallucinated testid — no exact match in DB.
+                # Only replace if we find an element with an EXACT name match
+                # (not fuzzy keyword search which corrupts plans).
+                value = str(sel.get("value", ""))
+                if not value or not url:
+                    return None
+                from locator_db import _normalize_url
+                norm_url = _normalize_url(url)
+                value_lc = value.lower().replace("-", " ").replace("_", " ")
+                for loc in self._db._locs.all():
+                    if _normalize_url(loc.get("url", "")) != norm_url:
+                        continue
+                    ident = loc.get("identity", {})
+                    db_name = ident.get("name", "").lower()
+                    db_role = ident.get("role", "")
+                    if not db_name or not db_role:
+                        continue
+                    # Exact match: testid words match element name words exactly
+                    # e.g. "add-to-cart-btn" → "add to cart btn" vs "Add to cart"
+                    if db_name == value_lc or db_name.replace(" ", "") == value_lc.replace(" ", ""):
+                        return {"strategy": "role",
+                                "value": {"role": db_role, "name": ident["name"]},
+                                "_auto_fixed": True, "_original_value": sel}
+                return None
+            return _stable_alternative(sel)
 
         for plan in plans:
             steps = plan.get("steps", [])
-            # Fix step selectors, tracking current URL context
             curr_url = ""
             for step in steps:
                 if step.get("action") == "navigate":
                     curr_url = step.get("url", curr_url)
                 sel = step.get("selector") or {}
                 if sel.get("strategy") in ("testid", "testid_prefix"):
-                    replacement = self._find_best_role_selector(sel, curr_url)
+                    replacement = _get_replacement(sel, curr_url)
                     if replacement:
                         step["selector"] = replacement
 
-            # Fix assertion selectors (use last navigate URL)
             last_url = ""
             for s in steps:
                 if s.get("action") == "navigate":
@@ -987,7 +1297,7 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
             for assertion in plan.get("assertions", []):
                 sel = assertion.get("selector") or {}
                 if sel and sel.get("strategy") in ("testid", "testid_prefix"):
-                    replacement = self._find_best_role_selector(sel, last_url)
+                    replacement = _get_replacement(sel, last_url)
                     if replacement:
                         assertion["selector"] = replacement
 
@@ -1015,27 +1325,69 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
             for step in steps:
                 if step.get("action") == "navigate":
                     curr_url = step.get("url", curr_url)
+                # Track URL changes through link clicks
+                elif step.get("action") == "click":
+                    click_sel = step.get("selector") or {}
+                    click_val = click_sel.get("value", {})
+                    if isinstance(click_val, dict) and click_val.get("role") == "link":
+                        link_dest = self._find_link_destination(click_val.get("name", ""), curr_url)
+                        if link_dest:
+                            curr_url = link_dest
                 sel = step.get("selector") or {}
                 if sel.get("strategy") == "role" and isinstance(sel.get("value"), dict):
                     plan_role = sel["value"].get("role", "")
                     plan_name = sel["value"].get("name", "")
                     if plan_role and plan_name and curr_url:
                         db_match = self._find_by_name_in_db(plan_name, curr_url)
-                        if db_match and db_match["role"] != plan_role:
-                            sel["value"]["role"] = db_match["role"]
-                            sel["_role_corrected"] = True
+                        if db_match:
+                            if db_match["role"] != plan_role:
+                                sel["value"]["role"] = db_match["role"]
+                                sel["_role_corrected"] = True
+                            if db_match["name"] != plan_name:
+                                sel["value"]["name"] = db_match["name"]
+                                sel["_name_corrected"] = True
+                        else:
+                            # No name match — try to find element by role + testid fallback
+                            testid_match = self._find_testid_for_role(plan_role, plan_name, curr_url)
+                            if testid_match:
+                                sel["strategy"] = "testid"
+                                sel["value"] = testid_match
+                                sel["_testid_fallback"] = True
+
+            # Also fix role/name in assertions
+            for assertion in plan.get("assertions", []):
+                sel = assertion.get("selector") or {}
+                if sel.get("strategy") == "role" and isinstance(sel.get("value"), dict):
+                    plan_role = sel["value"].get("role", "")
+                    plan_name = sel["value"].get("name", "")
+                    if plan_role and plan_name and curr_url:
+                        db_match = self._find_by_name_in_db(plan_name, curr_url)
+                        if db_match:
+                            if db_match["role"] != plan_role:
+                                sel["value"]["role"] = db_match["role"]
+                                sel["_role_corrected"] = True
+                            if db_match["name"] != plan_name:
+                                sel["value"]["name"] = db_match["name"]
+                                sel["_name_corrected"] = True
+                        else:
+                            testid_match = self._find_testid_for_role(plan_role, plan_name, curr_url)
+                            if testid_match:
+                                sel["strategy"] = "testid"
+                                sel["value"] = testid_match
+                                sel["_testid_fallback"] = True
 
         return plans
 
     def _find_by_name_in_db(self, name: str, url: str) -> Optional[dict]:
         """
-        Find a locator DB entry whose accessible name fuzzy-matches `name`
+        Find a locator DB entry whose accessible name matches `name`
         scoped to `url`. Returns {role, name} or None.
 
         Match strategy (in priority order):
           1. Exact name match (case-insensitive)
-          2. DB name starts with plan name (handles "Add to Cart" vs "Add to cart")
-          3. Plan name starts with DB name (handles "Sign in" vs "Sign in to account")
+          2. Trivial difference only — trailing/leading punctuation or whitespace
+             e.g. "Password *" ↔ "Password", "Email address" ↔ "Email address *"
+             but NOT "Save" ↔ "Save Draft" (different words = different element)
         """
         if not self._db or not url:
             return None
@@ -1045,6 +1397,9 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
         name_lc  = name.strip().lower()
         if not name_lc:
             return None
+
+        # Characters considered trivial (can differ without changing identity)
+        _TRIVIAL = frozenset(" *!?:·•–—")
 
         exact   = None
         partial = None
@@ -1060,10 +1415,127 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
                 exact = {"role": db_role, "name": ident.get("name", "")}
                 break
             if exact is None and partial is None:
-                if db_name.startswith(name_lc) or name_lc.startswith(db_name):
-                    partial = {"role": db_role, "name": ident.get("name", "")}
+                # Only accept prefix match if the DIFFERENCE is trivial characters
+                if db_name.startswith(name_lc):
+                    diff = db_name[len(name_lc):]
+                    if diff and all(c in _TRIVIAL for c in diff):
+                        partial = {"role": db_role, "name": ident.get("name", "")}
+                elif name_lc.startswith(db_name):
+                    diff = name_lc[len(db_name):]
+                    if diff and all(c in _TRIVIAL for c in diff):
+                        partial = {"role": db_role, "name": ident.get("name", "")}
 
         return exact or partial
+
+    def _find_link_destination(self, link_name: str, from_url: str) -> Optional[str]:
+        """
+        Look up where a named link goes from a given page, using the nav graph transitions.
+        Returns destination URL or None.
+        """
+        if not self._db or not from_url or not link_name:
+            return None
+        from locator_db import _normalize_url
+        norm_from = _normalize_url(from_url)
+        name_lc = link_name.strip().lower()
+
+        # Check locator DB for links with href-like testids or known destinations
+        for loc in self._db._locs.all():
+            if _normalize_url(loc.get("url", "")) != norm_from:
+                continue
+            ident = loc.get("identity", {})
+            if ident.get("role") != "link":
+                continue
+            db_name = ident.get("name", "").strip().lower()
+            if db_name != name_lc:
+                continue
+            # Found the link — check if the chain has an href-based locator
+            # or look up transitions in the nav graph
+            break
+        else:
+            return None
+
+        # Search nav graph transitions for this from_url
+        try:
+            transitions = self._db._db.table("transitions").all()
+        except Exception:
+            return None
+        for t in transitions:
+            if _normalize_url(t.get("from_url", "")) != norm_from:
+                continue
+            to_url = t.get("to_url", "")
+            # Check if link name appears in the to_url path
+            if name_lc.replace(" ", "-").replace("?", "") in to_url.lower():
+                return to_url
+            # Check trigger element (may be dict or string)
+            trigger = t.get("trigger", "")
+            trigger_str = str(trigger.get("name", "")) if isinstance(trigger, dict) else str(trigger)
+            if name_lc in trigger_str.lower():
+                return to_url
+        return None
+
+    def _find_testid_for_role(self, role: str, hallucinated_name: str, url: str) -> Optional[str]:
+        """
+        When _find_by_name_in_db returns None (name is completely wrong),
+        try to find a testid for an element with the same role on the same page
+        whose name contains keywords from the hallucinated name.
+
+        Returns testid string or None.
+        """
+        if not self._db or not url:
+            return None
+        from locator_db import _normalize_url
+        norm_url = _normalize_url(url)
+        # Extract meaningful keywords from the hallucinated name
+        name_words = set(hallucinated_name.lower().replace("*", "").split())
+        name_words -= {"the", "a", "an", "your", "my", "is", "for", "and", "or"}
+        if not name_words:
+            return None
+
+        for loc in self._db._locs.all():
+            if _normalize_url(loc.get("url", "")) != norm_url:
+                continue
+            ident = loc.get("identity", {})
+            if ident.get("role", "") != role:
+                continue
+            chain = loc.get("locators", {}).get("chain", [])
+            testid = None
+            for c in chain:
+                if c.get("strategy") == "testid":
+                    testid = c.get("value")
+                    break
+            if not testid:
+                continue
+            # Check if any keyword from hallucinated name overlaps with element name or testid
+            db_name = ident.get("name", "").lower()
+            db_testid = testid.lower().replace("-", " ").replace("_", " ")
+            db_words = set(db_name.split()) | set(db_testid.split())
+            db_words -= {"the", "a", "an", "your", "my", "is", "for", "and", "or"}
+            if name_words & db_words:
+                return testid
+        return None
+
+    def _lookup_testid_role(self, testid_value: str, url: str) -> str:
+        """
+        Look up the ARIA role of an element by its testid value and page URL.
+        Returns the role string (e.g. "button", "link") or "" if not found.
+
+        Used by _fix_url_assertions to decide whether a testid click is a
+        navigation (link → may change URL) or an action (button → stays on page).
+        """
+        if not self._db or not url:
+            return ""
+        from locator_db import _normalize_url
+        norm_url = _normalize_url(url)
+        for loc in self._db._locs.all():
+            if _normalize_url(loc.get("url", "")) != norm_url:
+                continue
+            chain = loc.get("locators", {}).get("chain", [])
+            for c in chain:
+                if c.get("strategy") == "testid" and c.get("value") == testid_value:
+                    return loc.get("identity", {}).get("role", "")
+                if c.get("strategy") == "testid_prefix" and testid_value.startswith(c.get("value", "\x00")):
+                    return loc.get("identity", {}).get("role", "")
+        return ""  # not found → treat as unknown
 
     def _find_best_role_selector(self, sel: dict, url: str) -> Optional[dict]:
         """
@@ -1411,7 +1883,31 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
                     except json.JSONDecodeError as e2:
                         raise PlanningError(f"AI returned invalid JSON: {e2}\nPreview: {text[:300]}")
                 else:
-                    raise PlanningError(f"AI returned unclosed JSON array\nPreview: {text[:300]}")
+                    # Truncated output — try to recover complete plan objects
+                    # Find last complete "}" at depth=1 and close the array
+                    _log.warning("AI output truncated — attempting partial recovery")
+                    last_complete = -1
+                    d2, in_s2, esc2 = 0, False, False
+                    for i, ch in enumerate(text):
+                        if esc2:          esc2 = False; continue
+                        if ch == "\\":    esc2 = True;  continue
+                        if ch == '"':     in_s2 = not in_s2; continue
+                        if in_s2:         continue
+                        if ch in "[{":    d2 += 1
+                        elif ch in "]}":
+                            d2 -= 1
+                            if d2 == 1 and ch == "}":
+                                last_complete = i
+                    if last_complete > 0:
+                        # Trim trailing comma + close array
+                        recovered = text[:last_complete + 1].rstrip().rstrip(",") + "\n]"
+                        try:
+                            plans_data = json.loads(recovered)
+                            _log.info("Recovered %d complete plan(s) from truncated output", len(plans_data))
+                        except json.JSONDecodeError as e3:
+                            raise PlanningError(f"AI returned unclosed JSON array (recovery failed): {e3}\nPreview: {text[:300]}")
+                    else:
+                        raise PlanningError(f"AI returned unclosed JSON array\nPreview: {text[:300]}")
             else:
                 raise PlanningError(f"AI returned non-JSON response\nPreview: {text[:300]}")
 
@@ -1486,21 +1982,167 @@ Generate negative and boundary test cases. Output JSON array only — no markdow
                 # Even if one plan fails validation, we should try the rest
                 parsed_plans.append({"test_id": test_id, "_planning_error": str(e)})
 
-        # Normalize malformed selectors: LLaMA sometimes generates
+        # ── Post-processor pipeline ──────────────────────────────────
+
+        # P0: Fix assertion schema — AI sometimes puts selector in "value" instead of "selector"
+        for p in parsed_plans:
+            if "_planning_error" in p:
+                continue
+            for a in p.get("assertions", []):
+                val = a.get("value")
+                if isinstance(val, dict) and "strategy" in val and "selector" not in a:
+                    a["selector"] = val
+                    a.pop("value", None)
+                    a["_schema_fixed"] = True
+
+        # P0.02: Fix assertion param naming — AI sometimes uses "text" instead of "value"
+        # for content assertions (element_text_contains, element_text_equals, etc.)
+        _CONTENT_ASSERTIONS = {"element_text_contains", "element_text_equals", "element_text_matches",
+                               "element_value_contains", "element_value_equals"}
+        for p in parsed_plans:
+            if "_planning_error" in p:
+                continue
+            for a in p.get("assertions", []):
+                if a.get("type") in _CONTENT_ASSERTIONS:
+                    if "text" in a and "value" not in a:
+                        a["value"] = a.pop("text")
+                        a["_param_fixed"] = True
+
+        # P0.05: Fix assertion-as-action — AI sometimes uses assertion types as step actions
+        _ASSERTION_TO_WAIT_STATE = {
+            "element_visible": "visible",
+            "element_exists":  "attached",
+            "element_hidden":  "hidden",
+        }
+        for p in parsed_plans:
+            if "_planning_error" in p:
+                continue
+            for s in p.get("steps", []):
+                action = s.get("action", "")
+                if action in _ASSERTION_TO_WAIT_STATE and s.get("selector"):
+                    s["action"] = "wait"
+                    s["state"]  = _ASSERTION_TO_WAIT_STATE[action]
+
+        # P0.1: Fix wait schema — AI sometimes puts duration in "value" instead of "duration"
+        for p in parsed_plans:
+            if "_planning_error" in p:
+                continue
+            for s in p.get("steps", []):
+                if s.get("action") == "wait" and "value" in s and "duration" not in s:
+                    val = s.pop("value")
+                    if isinstance(val, (int, float)):
+                        s["duration"] = int(val)
+
+        # P0.3: Remove empty fill steps that target file/upload inputs.
+        # Empty fills on text inputs are kept — they may intentionally clear a field.
+        _FILE_INPUT_KEYWORDS = frozenset({"attachment", "file", "upload", "document", "image", "photo", "avatar", "resume", "cv"})
+        for p in parsed_plans:
+            if "_planning_error" in p:
+                continue
+            steps = p.get("steps", [])
+            if steps:
+                cleaned = []
+                for s in steps:
+                    if s.get("action") == "fill" and not s.get("value"):
+                        # Check if the selector name suggests a file input
+                        sel_val = s.get("selector", {}).get("value", "")
+                        sel_name = sel_val.get("name", "") if isinstance(sel_val, dict) else str(sel_val)
+                        if any(kw in sel_name.lower() for kw in _FILE_INPUT_KEYWORDS):
+                            continue  # drop empty fill on file inputs
+                    cleaned.append(s)
+                p["steps"] = cleaned
+
+        # P0.5: Remove vacuous assertions (url_contains with empty/trivial value)
+        for p in parsed_plans:
+            if "_planning_error" in p:
+                continue
+            assertions = p.get("assertions", [])
+            if assertions:
+                meaningful = []
+                for a in assertions:
+                    val = a.get("value", "")
+                    if a.get("type") in ("url_contains", "url_equals", "url_matches"):
+                        if not val or str(val).strip() in ("", "/", "?", ".*", ".*.*", "null", "undefined"):
+                            continue  # skip vacuous URL assertion
+                    meaningful.append(a)
+                p["assertions"] = meaningful
+
+        # P0.6: Remove assertions on static elements (always-present elements that prove nothing)
+        # Build the global set of static element selectors from all states in the DB
+        _static_selectors: set[str] = set()
+        if self._db:
+            _all_states = self._db.all_states() if hasattr(self._db, "all_states") else []
+            for _st in _all_states:
+                _ctx = _st.get("semantic_context") or {}
+                for _sel in _ctx.get("_static_elements", []):
+                    # normalise: strip quotes, lower, and store both forms
+                    _static_selectors.add(_sel.strip())
+                    _static_selectors.add(_sel.strip().replace("'", '"').replace('"', "'"))
+
+        if _static_selectors:
+            # Normalise selectors: strip quotes for quote-agnostic comparison
+            def _norm_sel(s: str) -> str:
+                return s.strip().replace("'", "").replace('"', "").replace(" ", "").lower()
+
+            _static_normalised = {_norm_sel(s) for s in _static_selectors}
+
+            for p in parsed_plans:
+                if "_planning_error" in p:
+                    continue
+                kept = []
+                for a in p.get("assertions", []):
+                    sel = a.get("selector", {})
+                    sel_val = sel.get("value", "") if isinstance(sel, dict) else ""
+                    sel_str = str(sel_val).strip() if sel_val else ""
+                    is_static = (sel_str in _static_selectors or
+                                 _norm_sel(sel_str) in _static_normalised)
+                    if is_static:
+                        a["_dropped_static"] = True
+                        continue  # remove assertion on static element
+                    kept.append(a)
+                if len(kept) < len(p.get("assertions", [])):
+                    dropped = len(p.get("assertions", [])) - len(kept)
+                    log.debug("P0.6: dropped %d static-element assertion(s) from %s",
+                                  dropped, p.get("test_id", "?"))
+                    # If all assertions were dropped, add a url_contains fallback
+                    if not kept:
+                        # Find the last navigate step to infer a meaningful URL path.
+                        # For form-submission pages (register, login, contact, forgot-password),
+                        # the URL CHANGES after submit — use the known redirect target instead.
+                        _FORM_REDIRECT_PATHS = {
+                            "/auth/register":        "/auth/login",
+                            "/auth/login":           "/account",
+                            "/auth/forgot-password": "/auth/forgot-password",
+                        }
+                        nav_url = None
+                        for step in reversed(p.get("steps", [])):
+                            if step.get("action") == "navigate":
+                                nav_url = step.get("url", "")
+                                break
+                        if nav_url:
+                            from urllib.parse import urlparse as _urlparse
+                            path = _urlparse(nav_url).path.rstrip("/") or "/"
+                            # Use known post-submit redirect if available
+                            fallback_path = _FORM_REDIRECT_PATHS.get(path, path)
+                            kept = [{"type": "url_contains", "value": fallback_path,
+                                     "_auto_added": "P0.6_fallback"}]
+                            log.debug("P0.6: added url_contains fallback '%s'", fallback_path)
+                p["assertions"] = kept
+
+        # P1: Normalize malformed selectors: LLaMA sometimes generates
         # {"strategy":"testid","value":{"testid":"foo"}} instead of {"strategy":"testid","value":"foo"}
         parsed_plans = [self._fix_malformed_selectors(p) for p in parsed_plans]
 
-        # Fix testid selectors on plain-HTML sites (operates across all plans at once
-        # so the has_testid check is evaluated once for the entire site).
+        # P2: Fix testid selectors — replace with stable role/label alternatives from DB.
         parsed_plans = self._fix_selector_strategies(parsed_plans)
 
-        # Fix role mismatches — correct role=button when DB has role=link, etc.
-        # Runs on all sites unconditionally.
+        # P3: Fix role mismatches — correct role=button when DB has role=link, etc.
         parsed_plans = self._fix_role_mismatches(parsed_plans)
 
-        # Small-model validation pass: one cheap call per plan to fix any remaining
-        # selector mismatches that rule-based post-processors couldn't catch.
-        if locators:
+        # P4: Small-model validation — DISABLED by default.
+        # The small model frequently undoes deterministic fixes from P1-P3.
+        # Enable via QAPAL_SMALL_MODEL_VALIDATOR=true if needed.
+        if os.getenv("QAPAL_SMALL_MODEL_VALIDATOR", "false").lower() == "true" and locators:
             parsed_plans = [
                 self._validate_plan_with_small_model(p, locators)
                 if "_planning_error" not in p else p

@@ -211,7 +211,15 @@ A11Y_JS = r"""
     }
 
     var isVisible = el.offsetWidth > 0 && el.offsetHeight > 0;
-    results.push({
+    // Extract <option> labels for <select> (combobox) elements
+    var options = null;
+    if (tag === 'select') {
+      options = Array.from(el.querySelectorAll('option'))
+        .map(function(o){ return o.textContent.trim(); })
+        .filter(function(t){ return t && !t.startsWith('Select'); });
+    }
+
+    var entry = {
       role:       role,
       name:       name,
       tag:        tag,
@@ -222,7 +230,9 @@ A11Y_JS = r"""
       ariaLabel:  el.getAttribute('aria-label') || '',
       loc:        loc,
       actionable: !!(testid || (role && name) || (hasSemanticId && isVisible)) && isVisible,
-    });
+    };
+    if (options) entry.options = options;
+    results.push(entry);
   }
   return results;
 }

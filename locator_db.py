@@ -342,6 +342,7 @@ class LocatorDB:
         container  = element.get("container", "")
         dom_path   = element.get("domPath", "")
         actionable = element.get("actionable", True)
+        options    = element.get("options")  # <select> option labels
         frame      = _make_frame(element, page_url)
         frame_url  = frame["url"]
         doc_id     = _make_id(page_url, role, name, container, frame_url, dom_path)
@@ -378,6 +379,7 @@ class LocatorDB:
                             "name_pattern": pattern,
                             "container":    container,
                             "dom_path":     dom_path or existing["identity"].get("dom_path", ""),
+                            **({"options": options} if options else {}),
                         },
                         "locators": {
                             "chain":      chain,
@@ -410,6 +412,7 @@ class LocatorDB:
                         "container":    container,
                         "dom_path":     dom_path,
                         "frame":        frame,
+                        **({"options": options} if options else {}),
                     },
                     "locators": {
                         "chain":      chain,
